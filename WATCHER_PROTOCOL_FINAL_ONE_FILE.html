@@ -1,0 +1,3659 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WATCHER PROTOCOL - FINAL DEMO</title>
+  <style>
+    html, body {
+      margin: 0;
+      overflow: hidden;
+      background: #05070d;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+      background: #05070d;
+    }
+    #hint {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 10px;
+      color: rgba(230,245,255,0.75);
+      text-align: center;
+      font-size: 14px;
+      text-shadow: 0 2px 8px #000;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hint">Enter / Space = continue/select • A/D/arrows = move/menu • W/Space/Up = air jump • S/Down = fast fall • E = interact • B = boss select</div>
+  <pre id="errorBox" style="display:none;position:fixed;top:12px;left:12px;right:12px;z-index:9999;background:#3b0010;color:#fff;padding:12px;border:2px solid #ff6f85;white-space:pre-wrap;font:14px monospace;"></pre>
+  <script>
+(() => {
+  "use strict";
+
+  window.onerror = function(message, source, line, column) {
+    const box = document.getElementById("errorBox");
+    if (box) {
+      box.style.display = "block";
+      box.textContent = "ERROR: " + message + "\nLine: " + line + " Column: " + column;
+    }
+  };
+
+  // =====================================================
+  // WATCHER PROTOCOL v0.1 - Message 10 FINAL DEMO
+  // Final packaged demo: intro, tutorial, mini-boss, 4 bosses,
+  // checkpoint select, save progress, and one-file build.
+  // =====================================================
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  let W = innerWidth;
+  let H = innerHeight;
+  const DPR = Math.min(devicePixelRatio || 1, 2);
+
+  function resize() {
+    W = innerWidth;
+    H = innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  addEventListener("resize", resize);
+  resize();
+
+  const keys = Object.create(null);
+
+  addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    keys[k] = true;
+
+    if (k === "b" && game.state !== "narrator") {
+      e.preventDefault();
+      game.state = "bossSelect";
+      dialogue.active = false;
+      game.message = "";
+      return;
+    }
+
+    if (game.state === "bossSelect") {
+      if (e.key === "ArrowUp" || k === "w") {
+        bossSelect.index = (bossSelect.index + bossSelect.options.length - 1) % bossSelect.options.length;
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "ArrowDown" || k === "s") {
+        bossSelect.index = (bossSelect.index + 1) % bossSelect.options.length;
+        e.preventDefault();
+        return;
+      }
+      if (k === "enter" || e.key === " " || k === "e") {
+        e.preventDefault();
+        chooseBossSelect();
+        return;
+      }
+    }
+
+    if (
+      game.state === "scoutPlayerTurn" ||
+      game.state === "watcherPlayerTurn" ||
+      game.state === "jesterPlayerTurn" ||
+      game.state === "mothPlayerTurn" ||
+      game.state === "lanternPlayerTurn"
+    ) {
+      if (e.key === "ArrowLeft" || k === "a") {
+        battle.menuIndex = (battle.menuIndex + menuItems.length - 1) % menuItems.length;
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "ArrowRight" || k === "d") {
+        battle.menuIndex = (battle.menuIndex + 1) % menuItems.length;
+        e.preventDefault();
+        return;
+      }
+      if (k === "enter" || e.key === " " || k === "e") {
+        e.preventDefault();
+        chooseBattleAction();
+        return;
+      }
+      if (k === "1") { battle.menuIndex = 0; chooseBattleAction(); return; }
+      if (k === "2") { battle.menuIndex = 1; chooseBattleAction(); return; }
+      if (k === "3") { battle.menuIndex = 2; chooseBattleAction(); return; }
+    }
+
+    if (k === "enter" || e.key === " " || k === "e") {
+      if (
+        game.state !== "tutorial" &&
+        game.state !== "scoutBattle" &&
+        game.state !== "watcherBattle" &&
+        game.state !== "jesterBattle" &&
+        game.state !== "mothBattle" &&
+        game.state !== "lanternBattle"
+      ) e.preventDefault();
+      handleConfirm(k, e.key);
+    }
+
+    if (
+      (
+        game.state === "tutorial" ||
+        game.state === "scoutBattle" ||
+        game.state === "watcherBattle" ||
+        game.state === "jesterBattle" ||
+        game.state === "mothBattle" ||
+        game.state === "lanternBattle"
+      ) &&
+      (e.key === " " || k === "w" || e.key === "ArrowUp")
+    ) {
+      e.preventDefault();
+      queueAirJump();
+    }
+  });
+
+  addEventListener("keyup", (e) => {
+    keys[e.key.toLowerCase()] = false;
+  });
+
+  function clamp(v, min, max) {
+    return Math.max(min, Math.min(max, v));
+  }
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function approach(v, target, amount) {
+    if (v < target) return Math.min(v + amount, target);
+    if (v > target) return Math.max(v - amount, target);
+    return target;
+  }
+
+  function roundRect(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function rectsOverlap(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function drawScanlines() {
+    ctx.save();
+    ctx.globalAlpha = 0.075;
+    ctx.fillStyle = "#ffffff";
+    for (let y = (game.scanlineOffset % 6) - 6; y < H; y += 6) {
+      ctx.fillRect(0, y, W, 1);
+    }
+    ctx.restore();
+
+    const vignette = ctx.createRadialGradient(W / 2, H / 2, W * 0.2, W / 2, H / 2, W * 0.85);
+    vignette.addColorStop(0, "rgba(0,0,0,0)");
+    vignette.addColorStop(1, "rgba(0,0,0,0.34)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function wrapText(text, x, y, maxW, lineH, font, color, align = "left") {
+    ctx.save();
+    ctx.font = font;
+    ctx.fillStyle = color;
+    ctx.textAlign = align;
+    ctx.textBaseline = "top";
+    const words = text.split(" ");
+    let line = "";
+    let yy = y;
+
+    for (let i = 0; i < words.length; i++) {
+      const test = line + words[i] + " ";
+      if (ctx.measureText(test).width > maxW && i > 0) {
+        ctx.fillText(line, x, yy);
+        line = words[i] + " ";
+        yy += lineH;
+      } else {
+        line = test;
+      }
+    }
+
+    ctx.fillText(line, x, yy);
+    ctx.restore();
+    return yy + lineH;
+  }
+
+  const game = {
+    state: "title",
+    time: 0,
+    scanlineOffset: 0,
+    message: "",
+    shake: 0
+  };
+
+  const SAVE_KEY = "watcher_protocol_save_v1";
+
+  const progress = {
+    unlockedBoss: 1,
+    watcherDefeated: false,
+    jesterDefeated: false,
+    mothDefeated: false,
+    lanternDefeated: false
+  };
+
+  const bossSelect = {
+    index: 0,
+    options: [
+      { label: "STORY START", desc: "Start from the AI briefing and lab room.", kind: "story" },
+      { label: "TUTORIAL", desc: "Practice air-jump movement and dodging.", kind: "tutorial" },
+      { label: "MINI-BOSS: WATCHER SCOUT", desc: "Replay the first training mini-boss.", kind: "scout" },
+      { label: "BOSS 1: THE WATCHER", desc: "Fight the first true boss.", kind: "watcher" },
+      { label: "BOSS 2: THORN JESTER", desc: "Preview fight: trick beams, bouncing thorns, fake warnings.", kind: "jester" },
+      { label: "BOSS 3: STATIC MOTH", desc: "Electric grid boss: sparks, blackout flashes, and moving safe lanes.", kind: "moth" },
+      { label: "BOSS 4: BONE LANTERN", desc: "Memory boss: sliding bars, rotating light, and shrinking space.", kind: "lantern" },
+      { label: "RESET SAVE", desc: "Clear local checkpoint progress.", kind: "reset" }
+    ]
+  };
+
+  function loadProgress() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (typeof saved.unlockedBoss === "number") progress.unlockedBoss = saved.unlockedBoss;
+      if (typeof saved.watcherDefeated === "boolean") progress.watcherDefeated = saved.watcherDefeated;
+      if (typeof saved.jesterDefeated === "boolean") progress.jesterDefeated = saved.jesterDefeated;
+      if (typeof saved.mothDefeated === "boolean") progress.mothDefeated = saved.mothDefeated;
+      if (typeof saved.lanternDefeated === "boolean") progress.lanternDefeated = saved.lanternDefeated;
+    } catch (err) {
+      console.warn("Could not load save", err);
+    }
+  }
+
+  function saveProgress() {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(progress));
+    } catch (err) {
+      console.warn("Could not save progress", err);
+    }
+  }
+
+  function unlockWatcherCheckpoint() {
+    progress.unlockedBoss = Math.max(progress.unlockedBoss, 2);
+    progress.watcherDefeated = true;
+    saveProgress();
+  }
+
+  loadProgress();
+
+  const player = {
+    x: 250,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    facing: 1,
+    anim: 0,
+    name: "UNIT-07",
+    realName: "Ari",
+    hp: 20,
+    maxHp: 20,
+    inv: 0,
+    jumpQueued: false
+  };
+
+  const professor = { x: 740, y: 0, anim: 0 };
+  const camera = { x: 0, y: 0 };
+
+  const lab = {
+    floorY: 430,
+    leftWall: 120,
+    rightWall: 1180,
+    exitX: 1085
+  };
+
+  const battleBox = {
+    x: 0,
+    y: 0,
+    w: 760,
+    h: 430
+  };
+
+  const tutorial = {
+    timer: 0,
+    phase: 0,
+    phaseTimer: 0,
+    completed: false,
+    bullets: [],
+    beams: [],
+    particles: [],
+    spawnedSlowFallText: false
+  };
+
+  const battle = {
+    active: false,
+    enemyTurn: true,
+    timer: 0,
+    turnDuration: 12,
+    menuIndex: 0,
+    actionMessage: "",
+    actionTimer: 0,
+    healCharges: 2,
+    victory: false,
+    bullets: [],
+    beams: [],
+    particles: []
+  };
+
+  const scout = {
+    name: "Watcher Scout",
+    hp: 24,
+    maxHp: 24,
+    analyzed: false,
+    defeated: false,
+    anim: 0
+  };
+
+  const watcher = {
+    name: "The Watcher",
+    hp: 52,
+    maxHp: 52,
+    analyzed: false,
+    defeated: false,
+    anim: 0,
+    phase: 1,
+    enraged: false
+  };
+
+  const jester = {
+    name: "Thorn Jester",
+    hp: 48,
+    maxHp: 48,
+    analyzed: false,
+    defeated: false,
+    anim: 0,
+    phase: 1
+  };
+
+  const moth = {
+    name: "Static Moth",
+    hp: 56,
+    maxHp: 56,
+    analyzed: false,
+    defeated: false,
+    anim: 0,
+    phase: 1
+  };
+
+  const lantern = {
+    name: "Bone Lantern",
+    hp: 62,
+    maxHp: 62,
+    analyzed: false,
+    defeated: false,
+    anim: 0,
+    phase: 1
+  };
+
+  const menuItems = ["ATTACK", "ANALYZE", "HEAL"];
+
+  const narratorLines = [
+    "BOOTING BLACKBOX ARCHIVE...",
+    "SUBJECT: UNIT-07",
+    "ORIGIN: GENETIC-CYBERNETIC MODIFICATION PROGRAM",
+    "BIOLOGICAL CORE: STABLE",
+    "CYBERNETIC NERVOUS LINK: ACTIVE",
+    "PURPOSE: MONSTER SUPPRESSION",
+    "THREAT SOURCE: OUTER ZONE",
+    "PRIMARY DIRECTIVE: SURVIVE THE TRIALS",
+    "SECONDARY DIRECTIVE: DESTROY THE WATCHER"
+  ];
+
+  let narratorIndex = 0;
+  let narratorChar = 0;
+  let narratorTimer = 0;
+  let narratorDone = false;
+
+  const dialogue = {
+    active: false,
+    speaker: "",
+    lines: [],
+    index: 0,
+    after: null
+  };
+
+  function startDialogue(speaker, lines, after) {
+    dialogue.active = true;
+    dialogue.speaker = speaker;
+    dialogue.lines = lines.slice();
+    dialogue.index = 0;
+    dialogue.after = after || null;
+  }
+
+  function nextDialogue() {
+    if (!dialogue.active) return false;
+    dialogue.index++;
+
+    if (dialogue.index >= dialogue.lines.length) {
+      dialogue.active = false;
+      const after = dialogue.after;
+      dialogue.after = null;
+      if (after) after();
+    }
+
+    return true;
+  }
+
+  function handleConfirm(k, rawKey) {
+    if (game.state === "title") {
+      game.state = "bossSelect";
+      game.time = 0;
+      return;
+    }
+
+    if (game.state === "narrator") {
+      if (!narratorDone) {
+        narratorChar = 9999;
+      } else {
+        startLabCutscene();
+      }
+      return;
+    }
+
+    if (dialogue.active) {
+      nextDialogue();
+      return;
+    }
+
+    if (game.state === "labFree" && k === "e") {
+      if (Math.abs(player.x - professor.x) < 95) professorTalk();
+      if (Math.abs(player.x - lab.exitX) < 80) startTutorialIntro();
+      return;
+    }
+
+    if (game.state === "tutorialComplete") {
+      startScoutIntro();
+      return;
+    }
+
+    if (game.state === "scoutVictory") {
+      startWatcherIntro();
+      return;
+    }
+
+    if (game.state === "watcherVictory") {
+      game.state = "endM5";
+      startDialogue("SYSTEM", [
+        "Boss 1 defeated.",
+        "Checkpoint saved: The Watcher.",
+        "Boss 2 preview is now available from mission select."
+      ]);
+      return;
+    }
+
+    if (game.state === "jesterVictory") {
+      game.state = "endM6";
+      startDialogue("SYSTEM", [
+        "Boss 2 preview defeated.",
+        "Checkpoint saved: Thorn Jester.",
+        "Boss 3 is now available from mission select."
+      ]);
+      return;
+    }
+
+    if (game.state === "mothVictory") {
+      game.state = "endM8";
+      startDialogue("SYSTEM", [
+        "Boss 3 defeated.",
+        "Checkpoint saved: Static Moth.",
+        "Boss 4 is now available from mission select."
+      ]);
+      return;
+    }
+
+    if (game.state === "lanternVictory") {
+      game.state = "endM9";
+      startDialogue("SYSTEM", [
+        "Boss 4 defeated.",
+        "Checkpoint saved: Bone Lantern.",
+        "Message 10 will package the final playable demo build."
+      ]);
+      return;
+    }
+  }
+
+
+  function resetStoryState() {
+    narratorIndex = 0;
+    narratorChar = 0;
+    narratorTimer = 0;
+    narratorDone = false;
+    scout.hp = scout.maxHp;
+    scout.defeated = false;
+    watcher.hp = watcher.maxHp;
+    watcher.defeated = false;
+    watcher.analyzed = false;
+    battle.healCharges = 2;
+    player.hp = player.maxHp;
+    player.name = "UNIT-07";
+    game.message = "";
+    dialogue.active = false;
+  }
+
+  function startStoryFromBeginning() {
+    resetStoryState();
+    game.state = "narrator";
+    game.time = 0;
+  }
+
+  function chooseBossSelect() {
+    const choice = bossSelect.options[bossSelect.index];
+
+    if (choice.kind === "story") {
+      startStoryFromBeginning();
+      return;
+    }
+
+    if (choice.kind === "tutorial") {
+      player.name = "Ari";
+      startTutorial();
+      return;
+    }
+
+    if (choice.kind === "scout") {
+      player.name = "Ari";
+      player.hp = player.maxHp;
+      scout.hp = scout.maxHp;
+      scout.defeated = false;
+      battle.healCharges = 2;
+      startScoutBattle();
+      return;
+    }
+
+    if (choice.kind === "watcher") {
+      player.name = "Ari";
+      player.hp = player.maxHp;
+      watcher.hp = watcher.maxHp;
+      watcher.defeated = false;
+      watcher.analyzed = false;
+      battle.healCharges = 2;
+      startWatcherIntro();
+      return;
+    }
+
+    if (choice.kind === "jester") {
+      player.name = "Ari";
+      player.hp = player.maxHp;
+      jester.hp = jester.maxHp;
+      jester.defeated = false;
+      jester.analyzed = false;
+      battle.healCharges = 2;
+      startJesterIntro();
+      return;
+    }
+
+    if (choice.kind === "moth") {
+      player.name = "Ari";
+      player.hp = player.maxHp;
+      moth.hp = moth.maxHp;
+      moth.defeated = false;
+      moth.analyzed = false;
+      battle.healCharges = 2;
+      startMothIntro();
+      return;
+    }
+
+    if (choice.kind === "lantern") {
+      player.name = "Ari";
+      player.hp = player.maxHp;
+      lantern.hp = lantern.maxHp;
+      lantern.defeated = false;
+      lantern.analyzed = false;
+      battle.healCharges = 2;
+      startLanternIntro();
+      return;
+    }
+
+    if (choice.kind === "reset") {
+      try { localStorage.removeItem(SAVE_KEY); } catch (err) {}
+      progress.unlockedBoss = 1;
+      progress.watcherDefeated = false;
+      progress.jesterDefeated = false;
+      progress.mothDefeated = false;
+      progress.lanternDefeated = false;
+      game.message = "Save data cleared.";
+      bossSelect.index = 0;
+    }
+  }
+
+  function startLabCutscene() {
+    game.state = "labCutscene";
+    game.time = 0;
+
+    player.x = 250;
+    player.y = lab.floorY;
+    player.vx = 0;
+    player.vy = 0;
+    professor.x = 740;
+    professor.y = lab.floorY;
+
+    startDialogue("Professor Vale", [
+      "Unit-07... can you hear me?",
+      "Your body survived the integration. Your mind is still your own.",
+      "The monsters outside the lab are changing faster than we can contain.",
+      "You were built to fight them, but you were not built to be a weapon only.",
+      "You need a name before you leave.",
+      "Ari. That will be your name."
+    ], () => {
+      player.name = "Ari";
+      game.state = "labFree";
+      game.message = "Move to the professor or the exit door. Press E to interact.";
+    });
+  }
+
+  function professorTalk() {
+    startDialogue("Professor Vale", [
+      "Ari, listen carefully.",
+      "The first enemy outside is only a scout drone. Do not panic.",
+      "Your movement system is unusual. You will learn to jump in air using burst pulses.",
+      "The Watcher is not the final monster, but it is the first one that will test you.",
+      "When you are ready, go to the right door."
+    ]);
+  }
+
+  function startTutorialIntro() {
+    game.state = "tutorialIntro";
+    game.message = "";
+    startDialogue("AI Common Narrator", [
+      "TUTORIAL CORRIDOR OPENED.",
+      "Unit Ari's combat movement is unstable but powerful.",
+      "Unlike standard soldiers, Ari does not simply jump once.",
+      "He uses repeated air-burst pulses to stay alive inside monster attack zones.",
+      "Training begins now."
+    ], startTutorial);
+  }
+
+  function startTutorial() {
+    game.state = "tutorial";
+    tutorial.timer = 0;
+    tutorial.phase = 0;
+    tutorial.phaseTimer = 0;
+    tutorial.completed = false;
+    tutorial.bullets.length = 0;
+    tutorial.beams.length = 0;
+    tutorial.particles.length = 0;
+    tutorial.spawnedSlowFallText = false;
+
+    player.hp = player.maxHp;
+    player.x = battleBox.x + battleBox.w * 0.22;
+    player.y = battleBox.y + battleBox.h * 0.55;
+    player.vx = 0;
+    player.vy = 0;
+    player.inv = 1;
+    game.message = "Use A/D to move. Press W/Space/Up to air jump.";
+  }
+
+  function layoutBattleBox() {
+    battleBox.w = Math.min(880, W - 56);
+    battleBox.h = Math.min(510, H - 150);
+    battleBox.x = W / 2 - battleBox.w / 2;
+    battleBox.y = H / 2 - battleBox.h / 2 + 30;
+  }
+
+  function queueAirJump() {
+    if (
+      game.state !== "tutorial" &&
+      game.state !== "scoutBattle" &&
+      game.state !== "watcherBattle" &&
+      game.state !== "jesterBattle" &&
+      game.state !== "mothBattle" &&
+      game.state !== "lanternBattle"
+    ) return;
+    player.jumpQueued = true;
+  }
+
+  function damagePlayer(amount, reason) {
+    if (player.inv > 0) return;
+    if (
+      game.state !== "tutorial" &&
+      game.state !== "scoutBattle" &&
+      game.state !== "watcherBattle" &&
+      game.state !== "jesterBattle" &&
+      game.state !== "mothBattle" &&
+      game.state !== "lanternBattle"
+    ) return;
+
+    player.hp -= amount;
+    player.inv = 0.85;
+    game.shake = 0.18;
+
+    if (
+      game.state === "scoutBattle" ||
+      game.state === "watcherBattle" ||
+      game.state === "jesterBattle" ||
+      game.state === "mothBattle" ||
+      game.state === "lanternBattle"
+    ) spawnBattleParticles(player.x, player.y, 16, "#ff6f85");
+    else spawnTutorialParticles(player.x, player.y, 16, "#ff6f85");
+
+    if (reason) game.message = reason;
+
+    if (player.hp <= 0) {
+      player.hp = player.maxHp;
+      player.x = battleBox.x + battleBox.w * 0.22;
+      player.y = battleBox.y + battleBox.h * 0.55;
+      player.vx = 0;
+      player.vy = 0;
+      player.inv = 1.2;
+
+      if (game.state === "lanternBattle") {
+        startLanternBattle();
+        game.message = "Boss attempt reset. Bone Lantern relights the chamber.";
+      } else if (game.state === "mothBattle") {
+        startMothBattle();
+        game.message = "Boss attempt reset. Static Moth recharges the grid.";
+      } else if (game.state === "jesterBattle") {
+        startJesterBattle();
+        game.message = "Boss attempt reset. The Jester laughs from the thorns.";
+      } else if (game.state === "watcherBattle") {
+        startWatcherBattle();
+        game.message = "Boss attempt reset. The Watcher studies your movement.";
+      } else if (game.state === "scoutBattle") {
+        startScoutBattle();
+        game.message = "Combat reset. Learn the Scout's pattern and strike back.";
+      } else {
+        tutorial.timer = 0;
+        tutorial.phase = 0;
+        tutorial.phaseTimer = 0;
+        tutorial.bullets.length = 0;
+        tutorial.beams.length = 0;
+        game.message = "System reset. Try again: dodge the attacks and survive.";
+      }
+    }
+  }
+
+  function spawnTutorialParticles(x, y, count, color) {
+    for (let i = 0; i < count; i++) {
+      tutorial.particles.push({
+        x,
+        y,
+        vx: (Math.random() - 0.5) * 220,
+        vy: (Math.random() - 0.5) * 220,
+        r: 2 + Math.random() * 4,
+        life: 0.35 + Math.random() * 0.25,
+        max: 0.6,
+        color
+      });
+    }
+  }
+
+  function spawnBullet(x, y, vx, vy, r, color, type = "orb") {
+    tutorial.bullets.push({ x, y, vx, vy, r, color, type, life: 10 });
+  }
+
+  function spawnBeam(x, y, w, h, warnTime, activeTime, color) {
+    tutorial.beams.push({
+      x, y, w, h,
+      warn: warnTime,
+      active: activeTime,
+      maxWarn: warnTime,
+      color,
+      hitDone: false
+    });
+  }
+
+  function updateNarrator(dt) {
+    narratorTimer += dt;
+
+    if (narratorIndex >= narratorLines.length) {
+      narratorDone = true;
+      return;
+    }
+
+    if (narratorTimer > 0.022) {
+      narratorTimer = 0;
+      narratorChar++;
+
+      const current = narratorLines[narratorIndex];
+      if (narratorChar > current.length + 18) {
+        narratorIndex++;
+        narratorChar = 0;
+      }
+    }
+  }
+
+  function updateLab(dt) {
+    professor.anim += dt;
+    player.anim += dt;
+
+    if (game.state !== "labFree" || dialogue.active) {
+      player.vx = lerp(player.vx, 0, 1 - Math.pow(0.0001, dt));
+    } else {
+      let input = 0;
+      if (keys.a || keys.arrowleft) input -= 1;
+      if (keys.d || keys.arrowright) input += 1;
+
+      if (input !== 0) {
+        player.vx = lerp(player.vx, input * 240, 1 - Math.pow(0.00001, dt));
+        player.facing = input;
+      } else {
+        player.vx = lerp(player.vx, 0, 1 - Math.pow(0.0001, dt));
+      }
+
+      player.x += player.vx * dt;
+      player.x = clamp(player.x, lab.leftWall + 30, lab.rightWall - 30);
+    }
+
+    camera.x = lerp(camera.x, clamp(player.x - W * 0.38, 0, 420), 1 - Math.pow(0.00005, dt));
+  }
+
+  function getPlayerBox() {
+    return {
+      x: player.x - 12,
+      y: player.y - 22,
+      w: 24,
+      h: 44
+    };
+  }
+
+  function updateTutorial(dt) {
+    layoutBattleBox();
+
+    tutorial.timer += dt;
+    tutorial.phaseTimer += dt;
+    player.anim += dt;
+    player.inv = Math.max(0, player.inv - dt);
+
+    let input = 0;
+    if (keys.a || keys.arrowleft) input -= 1;
+    if (keys.d || keys.arrowright) input += 1;
+
+    const accel = 1300;
+    const friction = 900;
+    const maxSpeed = 245;
+
+    if (input !== 0) {
+      player.vx = approach(player.vx, input * maxSpeed, accel * dt);
+      player.facing = input;
+    } else {
+      player.vx = approach(player.vx, 0, friction * dt);
+    }
+
+    if (player.jumpQueued) {
+      player.vy = -430;
+      player.jumpQueued = false;
+      spawnTutorialParticles(player.x, player.y + 18, 8, "#8deeff");
+    }
+
+    const fastFall = keys.s || keys.arrowdown;
+    const gravity = fastFall ? 1150 : 760;
+
+    player.vy += gravity * dt;
+    player.vy = clamp(player.vy, -520, fastFall ? 780 : 520);
+
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+
+    if (player.x < battleBox.x + 18) {
+      player.x = battleBox.x + 18;
+      player.vx = 0;
+    }
+    if (player.x > battleBox.x + battleBox.w - 18) {
+      player.x = battleBox.x + battleBox.w - 18;
+      player.vx = 0;
+    }
+    if (player.y < battleBox.y + 24) {
+      player.y = battleBox.y + 24;
+      player.vy = 30;
+    }
+    if (player.y > battleBox.y + battleBox.h - 22) {
+      player.y = battleBox.y + battleBox.h - 22;
+      player.vy = -90;
+    }
+
+    updateTutorialPhases(dt);
+    updateBullets(dt);
+    updateBeams(dt);
+    updateTutorialParticles(dt);
+
+    if (tutorial.timer >= 30 && !tutorial.completed) {
+      tutorial.completed = true;
+      game.state = "tutorialComplete";
+      game.message = "";
+      startDialogue("AI Common Narrator", [
+        "Movement calibration passed.",
+        "Ari can now survive basic monster attack zones.",
+        "Next procedure: live enemy contact."
+      ]);
+    }
+  }
+
+  function updateTutorialPhases(dt) {
+    // Phase changes every 10 seconds.
+    const newPhase = Math.min(2, Math.floor(tutorial.timer / 10));
+    if (newPhase !== tutorial.phase) {
+      tutorial.phase = newPhase;
+      tutorial.phaseTimer = 0;
+      tutorial.bullets.length = 0;
+      tutorial.beams.length = 0;
+
+      if (tutorial.phase === 1) game.message = "Good. Now dodge slow projectiles.";
+      if (tutorial.phase === 2) game.message = "Final drill: warning beams. Move before they fire.";
+    }
+
+    if (tutorial.phase === 0) {
+      game.message = "Air-jump to stay inside the box. Hold S/Down to fast fall.";
+      if (tutorial.phaseTimer > 3 && !tutorial.spawnedSlowFallText) {
+        tutorial.spawnedSlowFallText = true;
+      }
+      return;
+    }
+
+    if (tutorial.phase === 1) {
+      if (Math.floor(tutorial.phaseTimer * 1.65) !== Math.floor((tutorial.phaseTimer - dt) * 1.65)) {
+        const x = battleBox.x + 40 + Math.random() * (battleBox.w - 80);
+        spawnBullet(x, battleBox.y - 20, (Math.random() - 0.5) * 65, 120 + Math.random() * 60, 8, "#ffffff", "orb");
+      }
+
+      if (Math.floor(tutorial.phaseTimer * 0.9) !== Math.floor((tutorial.phaseTimer - dt) * 0.9)) {
+        const fromLeft = Math.random() > 0.5;
+        spawnBullet(
+          fromLeft ? battleBox.x - 20 : battleBox.x + battleBox.w + 20,
+          battleBox.y + 50 + Math.random() * (battleBox.h - 100),
+          fromLeft ? 145 : -145,
+          0,
+          7,
+          "#8deeff",
+          "orb"
+        );
+      }
+      return;
+    }
+
+    if (tutorial.phase === 2) {
+      if (Math.floor(tutorial.phaseTimer * 0.64) !== Math.floor((tutorial.phaseTimer - dt) * 0.64)) {
+        const vertical = Math.random() > 0.45;
+
+        if (vertical) {
+          const x = battleBox.x + 55 + Math.random() * (battleBox.w - 110);
+          spawnBeam(x, battleBox.y, 24, battleBox.h, 0.72, 0.24, "#fff4a8");
+        } else {
+          const y = battleBox.y + 50 + Math.random() * (battleBox.h - 100);
+          spawnBeam(battleBox.x, y, battleBox.w, 22, 0.72, 0.24, "#ff6f85");
+        }
+      }
+
+      if (Math.floor(tutorial.phaseTimer * 1.28) !== Math.floor((tutorial.phaseTimer - dt) * 1.28)) {
+        const x = battleBox.x + 40 + Math.random() * (battleBox.w - 80);
+        spawnBullet(x, battleBox.y - 20, 0, 150, 7, "#ffffff", "orb");
+      }
+    }
+  }
+
+  function updateBullets(dt) {
+    const playerBox = getPlayerBox();
+
+    for (let i = tutorial.bullets.length - 1; i >= 0; i--) {
+      const b = tutorial.bullets[i];
+      if (!b) {
+        tutorial.bullets.splice(i, 1);
+        continue;
+      }
+
+      b.life -= dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      if (b.bounce) {
+        if (b.y < battleBox.y + b.r) {
+          b.y = battleBox.y + b.r;
+          b.vy = Math.abs(b.vy);
+        }
+        if (b.y > battleBox.y + battleBox.h - b.r) {
+          b.y = battleBox.y + battleBox.h - b.r;
+          b.vy = -Math.abs(b.vy);
+        }
+      }
+
+      const bulletBox = { x: b.x - b.r, y: b.y - b.r, w: b.r * 2, h: b.r * 2 };
+      if (rectsOverlap(playerBox, bulletBox)) {
+        damagePlayer(2, "Training hit detected. Keep moving.");
+        tutorial.bullets.splice(i, 1);
+        continue;
+      }
+
+      if (
+        b.life <= 0 ||
+        b.x < battleBox.x - 90 ||
+        b.x > battleBox.x + battleBox.w + 90 ||
+        b.y < battleBox.y - 90 ||
+        b.y > battleBox.y + battleBox.h + 90
+      ) {
+        tutorial.bullets.splice(i, 1);
+      }
+    }
+  }
+
+  function updateBeams(dt) {
+    const playerBox = getPlayerBox();
+
+    for (let i = tutorial.beams.length - 1; i >= 0; i--) {
+      const beam = tutorial.beams[i];
+      if (!beam) {
+        tutorial.beams.splice(i, 1);
+        continue;
+      }
+
+      if (beam.warn > 0) {
+        beam.warn -= dt;
+      } else {
+        beam.active -= dt;
+
+        if (!beam.hitDone && rectsOverlap(playerBox, beam)) {
+          beam.hitDone = true;
+          damagePlayer(3, "Warning beams must be avoided before they fire.");
+        }
+      }
+
+      if (beam.warn <= 0 && beam.active <= 0) {
+        tutorial.beams.splice(i, 1);
+      }
+    }
+  }
+
+  function updateTutorialParticles(dt) {
+    for (let i = tutorial.particles.length - 1; i >= 0; i--) {
+      const p = tutorial.particles[i];
+      if (!p) {
+        tutorial.particles.splice(i, 1);
+        continue;
+      }
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= Math.pow(0.06, dt);
+      p.vy *= Math.pow(0.06, dt);
+
+      if (p.life <= 0) tutorial.particles.splice(i, 1);
+    }
+  }
+
+
+  // =====================================================
+  // FIRST ENEMY: WATCHER SCOUT
+  // =====================================================
+
+  function startScoutIntro() {
+    game.state = "scoutIntro";
+    startDialogue("AI Common Narrator", [
+      "MOVEMENT CALIBRATION COMPLETE.",
+      "Live enemy contact detected beyond the tutorial wall.",
+      "Threat classification: Watcher Scout.",
+      "Survive its attack pattern. Then respond during your turn."
+    ], startScoutBattle);
+  }
+
+  function startScoutBattle() {
+    layoutBattleBox();
+
+    game.state = "scoutBattle";
+    battle.active = true;
+    battle.enemyTurn = true;
+    battle.timer = 0;
+    battle.actionMessage = "";
+    battle.actionTimer = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+    battle.particles.length = 0;
+
+    if (scout.defeated) {
+      scout.hp = scout.maxHp;
+      scout.defeated = false;
+    }
+
+    player.x = battleBox.x + battleBox.w * 0.22;
+    player.y = battleBox.y + battleBox.h * 0.55;
+    player.vx = 0;
+    player.vy = 0;
+    player.inv = 1.0;
+    game.message = "Watcher Scout attacks. Survive until your turn.";
+  }
+
+  function startScoutPlayerTurn() {
+    game.state = "scoutPlayerTurn";
+    battle.enemyTurn = false;
+    battle.timer = 0;
+    battle.menuIndex = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+    battle.actionMessage = "Choose an action.";
+    game.message = "Your turn. Use Left/Right and Enter, or press 1/2/3.";
+  }
+
+  function chooseBattleAction() {
+    if (game.state === "lanternPlayerTurn") {
+      chooseLanternAction();
+      return;
+    }
+
+    if (game.state === "mothPlayerTurn") {
+      chooseMothAction();
+      return;
+    }
+
+    if (game.state === "jesterPlayerTurn") {
+      chooseJesterAction();
+      return;
+    }
+
+    if (game.state === "watcherPlayerTurn") {
+      chooseWatcherAction();
+      return;
+    }
+
+    if (game.state !== "scoutPlayerTurn") return;
+
+    const action = menuItems[battle.menuIndex];
+
+    if (action === "ATTACK") {
+      const damage = scout.analyzed ? 8 : 6;
+      scout.hp = Math.max(0, scout.hp - damage);
+      battle.actionMessage = "Ari fires a pulse shot. Watcher Scout takes " + damage + " damage.";
+      spawnBattleParticles(battleBox.x + battleBox.w * 0.72, battleBox.y + 90, 22, "#fff4a8");
+
+      if (scout.hp <= 0) {
+        scout.defeated = true;
+        game.state = "scoutVictory";
+        startDialogue("AI Common Narrator", [
+          "Watcher Scout disabled.",
+          "Ari's first live combat trial is complete.",
+          "The real Watcher has noticed."
+        ]);
+        return;
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "scoutPlayerTurn") startScoutBattle();
+      }, 900);
+      return;
+    }
+
+    if (action === "ANALYZE") {
+      scout.analyzed = true;
+      battle.actionMessage = "ANALYSIS: Scout uses slow beams and white tracking shots. Weak armor detected.";
+      game.message = "Scout analyzed. Your next attacks deal more damage.";
+
+      setTimeoutSafe(() => {
+        if (game.state === "scoutPlayerTurn") startScoutBattle();
+      }, 1400);
+      return;
+    }
+
+    if (action === "HEAL") {
+      if (battle.healCharges > 0) {
+        battle.healCharges--;
+        player.hp = Math.min(player.maxHp, player.hp + 6);
+        battle.actionMessage = "Repair gel used. HP restored by 6.";
+      } else {
+        battle.actionMessage = "No repair gel left.";
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "scoutPlayerTurn") startScoutBattle();
+      }, 950);
+    }
+  }
+
+  function setTimeoutSafe(fn, ms) {
+    const startState = game.state;
+    setTimeout(() => {
+      if (game.state === startState) fn();
+    }, ms);
+  }
+
+  function updateScoutBattle(dt) {
+    layoutBattleBox();
+
+    scout.anim += dt;
+    battle.timer += dt;
+    player.anim += dt;
+    player.inv = Math.max(0, player.inv - dt);
+
+    updateAirMovement(dt);
+    updateScoutPatterns(dt);
+    updateBattleBullets(dt);
+    updateBattleBeams(dt);
+    updateBattleParticles(dt);
+
+    if (battle.timer >= battle.turnDuration) {
+      startScoutPlayerTurn();
+    }
+  }
+
+  function updateAirMovement(dt) {
+    let input = 0;
+    if (keys.a || keys.arrowleft) input -= 1;
+    if (keys.d || keys.arrowright) input += 1;
+
+    const accel = 1300;
+    const friction = 900;
+    const maxSpeed = 245;
+
+    if (input !== 0) {
+      player.vx = approach(player.vx, input * maxSpeed, accel * dt);
+      player.facing = input;
+    } else {
+      player.vx = approach(player.vx, 0, friction * dt);
+    }
+
+    if (player.jumpQueued) {
+      player.vy = -430;
+      player.jumpQueued = false;
+      spawnBattleParticles(player.x, player.y + 18, 8, "#8deeff");
+    }
+
+    const fastFall = keys.s || keys.arrowdown;
+    const gravity = fastFall ? 1150 : 760;
+
+    player.vy += gravity * dt;
+    player.vy = clamp(player.vy, -520, fastFall ? 780 : 520);
+
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+
+    if (player.x < battleBox.x + 18) {
+      player.x = battleBox.x + 18;
+      player.vx = 0;
+    }
+    if (player.x > battleBox.x + battleBox.w - 18) {
+      player.x = battleBox.x + battleBox.w - 18;
+      player.vx = 0;
+    }
+    if (player.y < battleBox.y + 24) {
+      player.y = battleBox.y + 24;
+      player.vy = 30;
+    }
+    if (player.y > battleBox.y + battleBox.h - 22) {
+      player.y = battleBox.y + battleBox.h - 22;
+      player.vy = -90;
+    }
+  }
+
+  function updateScoutPatterns(dt) {
+    const t = battle.timer;
+
+    // Falling white shots.
+    if (Math.floor(t * 2.2) !== Math.floor((t - dt) * 2.2)) {
+      const x = battleBox.x + 35 + Math.random() * (battleBox.w - 70);
+      spawnBattleBullet(x, battleBox.y - 20, (Math.random() - 0.5) * 45, 125 + Math.random() * 40, 7, "#ffffff");
+    }
+
+    // Side shots.
+    if (Math.floor(t * 1.2) !== Math.floor((t - dt) * 1.2)) {
+      const fromLeft = Math.random() > 0.5;
+      spawnBattleBullet(
+        fromLeft ? battleBox.x - 20 : battleBox.x + battleBox.w + 20,
+        battleBox.y + 50 + Math.random() * (battleBox.h - 100),
+        fromLeft ? 135 : -135,
+        0,
+        7,
+        "#8deeff"
+      );
+    }
+
+    // Warning beams.
+    if (t > 4 && Math.floor(t * 0.72) !== Math.floor((t - dt) * 0.72)) {
+      const x = battleBox.x + 55 + Math.random() * (battleBox.w - 110);
+      spawnBattleBeam(x, battleBox.y, 24, battleBox.h, 0.78, 0.25, "#fff4a8");
+    }
+  }
+
+  function spawnBattleBullet(x, y, vx, vy, r, color) {
+    battle.bullets.push({ x, y, vx, vy, r, color, life: 10 });
+  }
+
+  function spawnBattleBeam(x, y, w, h, warnTime, activeTime, color) {
+    battle.beams.push({
+      x, y, w, h,
+      warn: warnTime,
+      active: activeTime,
+      maxWarn: warnTime,
+      color,
+      hitDone: false
+    });
+  }
+
+  function spawnBattleParticles(x, y, count, color) {
+    for (let i = 0; i < count; i++) {
+      battle.particles.push({
+        x,
+        y,
+        vx: (Math.random() - 0.5) * 220,
+        vy: (Math.random() - 0.5) * 220,
+        r: 2 + Math.random() * 4,
+        life: 0.35 + Math.random() * 0.25,
+        max: 0.6,
+        color
+      });
+    }
+  }
+
+  function updateBattleBullets(dt) {
+    const playerBox = getPlayerBox();
+
+    for (let i = battle.bullets.length - 1; i >= 0; i--) {
+      const b = battle.bullets[i];
+      if (!b) {
+        battle.bullets.splice(i, 1);
+        continue;
+      }
+
+      b.life -= dt;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      if (b.bounce) {
+        if (b.y < battleBox.y + b.r) {
+          b.y = battleBox.y + b.r;
+          b.vy = Math.abs(b.vy);
+        }
+        if (b.y > battleBox.y + battleBox.h - b.r) {
+          b.y = battleBox.y + battleBox.h - b.r;
+          b.vy = -Math.abs(b.vy);
+        }
+      }
+
+      const bulletBox = { x: b.x - b.r, y: b.y - b.r, w: b.r * 2, h: b.r * 2 };
+      if (rectsOverlap(playerBox, bulletBox)) {
+        damagePlayer(2, "Scout shot landed. Stay airborne.");
+        battle.bullets.splice(i, 1);
+        continue;
+      }
+
+      if (
+        b.life <= 0 ||
+        b.x < battleBox.x - 90 ||
+        b.x > battleBox.x + battleBox.w + 90 ||
+        b.y < battleBox.y - 90 ||
+        b.y > battleBox.y + battleBox.h + 90
+      ) {
+        battle.bullets.splice(i, 1);
+      }
+    }
+  }
+
+  function updateBattleBeams(dt) {
+    const playerBox = getPlayerBox();
+
+    for (let i = battle.beams.length - 1; i >= 0; i--) {
+      const beam = battle.beams[i];
+      if (!beam) {
+        battle.beams.splice(i, 1);
+        continue;
+      }
+
+      if (beam.warn > 0) {
+        beam.warn -= dt;
+      } else {
+        beam.active -= dt;
+
+        if (!beam.hitDone && rectsOverlap(playerBox, beam)) {
+          beam.hitDone = true;
+          damagePlayer(3, "Scout beam hit. Move when the warning appears.");
+        }
+      }
+
+      if (beam.warn <= 0 && beam.active <= 0) {
+        battle.beams.splice(i, 1);
+      }
+    }
+  }
+
+  function updateBattleParticles(dt) {
+    for (let i = battle.particles.length - 1; i >= 0; i--) {
+      const p = battle.particles[i];
+      if (!p) {
+        battle.particles.splice(i, 1);
+        continue;
+      }
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= Math.pow(0.06, dt);
+      p.vy *= Math.pow(0.06, dt);
+
+      if (p.life <= 0) battle.particles.splice(i, 1);
+    }
+  }
+
+
+  // =====================================================
+  // BOSS 1: THE WATCHER
+  // =====================================================
+
+  function startWatcherIntro() {
+    game.state = "watcherIntro";
+    battle.healCharges = 2;
+    player.hp = player.maxHp;
+
+    startDialogue("AI Common Narrator", [
+      "SCOUT DESTROYED.",
+      "Warning: the enemy network has responded.",
+      "A large hostile signature is opening above the combat chamber.",
+      "Boss 1 identified: The Watcher.",
+      "This enemy is not a drone. It learns."
+    ], () => {
+      startDialogue("The Watcher", [
+        "..."
+        ,"SUBJECT: ARI."
+        ,"MOVEMENT: ACCEPTABLE."
+        ,"FEAR RESPONSE: PENDING."
+        ,"BEGIN OBSERVATION."
+      ], startWatcherBattle);
+    });
+  }
+
+  function startWatcherBattle() {
+    layoutBattleBox();
+
+    game.state = "watcherBattle";
+    battle.active = true;
+    battle.enemyTurn = true;
+    battle.timer = 0;
+    battle.turnDuration = 14;
+    battle.actionMessage = "";
+    battle.actionTimer = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+    battle.particles.length = 0;
+
+    watcher.phase = watcher.hp <= 18 ? 3 : watcher.hp <= 34 ? 2 : 1;
+    watcher.enraged = watcher.phase >= 3;
+
+    player.x = battleBox.x + battleBox.w * 0.22;
+    player.y = battleBox.y + battleBox.h * 0.55;
+    player.vx = 0;
+    player.vy = 0;
+    player.inv = 1.0;
+
+    game.message = "The Watcher attacks. Read the warnings.";
+  }
+
+  function startWatcherPlayerTurn() {
+    game.state = "watcherPlayerTurn";
+    battle.enemyTurn = false;
+    battle.timer = 0;
+    battle.menuIndex = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+
+    const phaseText = watcher.phase === 3
+      ? "The Watcher's iris is cracking."
+      : watcher.phase === 2
+        ? "The Watcher is adapting."
+        : "The Watcher waits for your response.";
+
+    battle.actionMessage = phaseText;
+    game.message = "Your turn. Attack, Analyze, or Heal.";
+  }
+
+  function chooseWatcherAction() {
+    if (game.state !== "watcherPlayerTurn") return;
+
+    const action = menuItems[battle.menuIndex];
+
+    if (action === "ATTACK") {
+      const base = watcher.analyzed ? 8 : 6;
+      const phaseBonus = watcher.phase >= 3 ? 2 : 0;
+      const damage = base + phaseBonus;
+
+      watcher.hp = Math.max(0, watcher.hp - damage);
+      battle.actionMessage = "Ari overloads his cyber arm. The Watcher takes " + damage + " damage.";
+      spawnBattleParticles(W / 2, battleBox.y - 80, 28, "#fff4a8");
+
+      if (watcher.hp <= 0) {
+        watcher.defeated = true;
+        unlockWatcherCheckpoint();
+        game.state = "watcherVictory";
+        startDialogue("The Watcher", [
+          "VISUAL CORE... FAILURE.",
+          "SUBJECT ARI... RECALCULATED.",
+          "THE OTHERS WILL SEE YOU NOW."
+        ]);
+        return;
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "watcherPlayerTurn") startWatcherBattle();
+      }, 950);
+      return;
+    }
+
+    if (action === "ANALYZE") {
+      watcher.analyzed = true;
+      battle.actionMessage = "ANALYSIS: Warning beams predict real lasers. The pupil shots drift toward your last position.";
+      game.message = "The Watcher's armor pattern is decoded. Attacks deal more damage.";
+
+      setTimeoutSafe(() => {
+        if (game.state === "watcherPlayerTurn") startWatcherBattle();
+      }, 1600);
+      return;
+    }
+
+    if (action === "HEAL") {
+      if (battle.healCharges > 0) {
+        battle.healCharges--;
+        player.hp = Math.min(player.maxHp, player.hp + 7);
+        battle.actionMessage = "Repair gel injected. HP restored by 7.";
+      } else {
+        battle.actionMessage = "No repair gel left.";
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "watcherPlayerTurn") startWatcherBattle();
+      }, 1000);
+    }
+  }
+
+  function updateWatcherBattle(dt) {
+    layoutBattleBox();
+
+    watcher.anim += dt;
+    battle.timer += dt;
+    player.anim += dt;
+    player.inv = Math.max(0, player.inv - dt);
+
+    updateAirMovement(dt);
+    updateWatcherPatterns(dt);
+    updateBattleBullets(dt);
+    updateBattleBeams(dt);
+    updateBattleParticles(dt);
+
+    if (battle.timer >= battle.turnDuration) {
+      startWatcherPlayerTurn();
+    }
+  }
+
+  function updateWatcherPatterns(dt) {
+    const t = battle.timer;
+    watcher.phase = watcher.hp <= 18 ? 3 : watcher.hp <= 34 ? 2 : 1;
+
+    // Phase 1: readable rain + single beams.
+    if (watcher.phase === 1) {
+      if (Math.floor(t * 2.25) !== Math.floor((t - dt) * 2.25)) {
+        const x = battleBox.x + 35 + Math.random() * (battleBox.w - 70);
+        spawnBattleBullet(x, battleBox.y - 20, (Math.random() - 0.5) * 35, 135 + Math.random() * 35, 8, "#ffffff");
+      }
+
+      if (Math.floor(t * 0.68) !== Math.floor((t - dt) * 0.68)) {
+        const x = battleBox.x + 60 + Math.random() * (battleBox.w - 120);
+        spawnBattleBeam(x, battleBox.y, 28, battleBox.h, 0.82, 0.27, "#fff4a8");
+      }
+      return;
+    }
+
+    // Phase 2: side glares and more beams.
+    if (watcher.phase === 2) {
+      if (Math.floor(t * 2.65) !== Math.floor((t - dt) * 2.65)) {
+        const fromLeft = Math.random() > 0.5;
+        const y = battleBox.y + 45 + Math.random() * (battleBox.h - 90);
+        spawnBattleBullet(
+          fromLeft ? battleBox.x - 20 : battleBox.x + battleBox.w + 20,
+          y,
+          fromLeft ? 175 : -175,
+          (Math.random() - 0.5) * 30,
+          8,
+          "#8deeff"
+        );
+      }
+
+      if (Math.floor(t * 0.98) !== Math.floor((t - dt) * 0.98)) {
+        if (Math.random() > 0.45) {
+          const x = battleBox.x + 55 + Math.random() * (battleBox.w - 110);
+          spawnBattleBeam(x, battleBox.y, 24, battleBox.h, 0.72, 0.25, "#fff4a8");
+        } else {
+          const y = battleBox.y + 48 + Math.random() * (battleBox.h - 96);
+          spawnBattleBeam(battleBox.x, y, battleBox.w, 24, 0.72, 0.23, "#ff6f85");
+        }
+      }
+
+      if (Math.floor(t * 1.18) !== Math.floor((t - dt) * 1.18)) {
+        spawnAimedShot(140, "#ffffff");
+      }
+      return;
+    }
+
+    // Phase 3: final stare, mixed pattern.
+    if (Math.floor(t * 3.35) !== Math.floor((t - dt) * 3.35)) {
+      const x = battleBox.x + 35 + Math.random() * (battleBox.w - 70);
+      spawnBattleBullet(x, battleBox.y - 20, (Math.random() - 0.5) * 70, 170 + Math.random() * 55, 7, "#ffffff");
+    }
+
+    if (Math.floor(t * 1.58) !== Math.floor((t - dt) * 1.58)) {
+      spawnAimedShot(175, "#8deeff");
+    }
+
+    if (Math.floor(t * 1.13) !== Math.floor((t - dt) * 1.13)) {
+      const x = battleBox.x + 55 + Math.random() * (battleBox.w - 110);
+      spawnBattleBeam(x, battleBox.y, 22, battleBox.h, 0.58, 0.23, "#fff4a8");
+    }
+
+    if (Math.floor(t * 0.72) !== Math.floor((t - dt) * 0.72)) {
+      const y = battleBox.y + 48 + Math.random() * (battleBox.h - 96);
+      spawnBattleBeam(battleBox.x, y, battleBox.w, 22, 0.62, 0.22, "#ff6f85");
+    }
+  }
+
+  function spawnAimedShot(speed, color) {
+    const sx = W / 2;
+    const sy = battleBox.y - 75;
+    const dx = player.x - sx;
+    const dy = player.y - sy;
+    const len = Math.max(1, Math.hypot(dx, dy));
+
+    spawnBattleBullet(
+      sx,
+      sy,
+      (dx / len) * speed,
+      (dy / len) * speed,
+      8,
+      color
+    );
+  }
+
+
+  // =====================================================
+  // BOSS 2 PREVIEW: THORN JESTER
+  // =====================================================
+
+  function startJesterIntro() {
+    game.state = "jesterIntro";
+    battle.healCharges = 2;
+    player.hp = player.maxHp;
+
+    startDialogue("AI Common Narrator", [
+      "Boss 2 preview loaded.",
+      "Threat classification: Thorn Jester.",
+      "This monster uses trick warnings and bouncing thorn shots.",
+      "Some warnings are fake. Do not move just because the screen tells you to."
+    ], () => {
+      startDialogue("Thorn Jester", [
+        "HEE-HEE.",
+        "Little machine boy learned to dodge an eye.",
+        "Now dodge a joke.",
+        "The punchline has spikes."
+      ], startJesterBattle);
+    });
+  }
+
+  function startJesterBattle() {
+    layoutBattleBox();
+
+    game.state = "jesterBattle";
+    battle.active = true;
+    battle.enemyTurn = true;
+    battle.timer = 0;
+    battle.turnDuration = 13;
+    battle.actionMessage = "";
+    battle.actionTimer = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+    battle.particles.length = 0;
+
+    jester.phase = jester.hp <= 18 ? 3 : jester.hp <= 34 ? 2 : 1;
+
+    player.x = battleBox.x + battleBox.w * 0.22;
+    player.y = battleBox.y + battleBox.h * 0.55;
+    player.vx = 0;
+    player.vy = 0;
+    player.inv = 1.0;
+
+    game.message = "Thorn Jester attacks. Some warnings are fake.";
+  }
+
+  function startJesterPlayerTurn() {
+    game.state = "jesterPlayerTurn";
+    battle.enemyTurn = false;
+    battle.timer = 0;
+    battle.menuIndex = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+
+    battle.actionMessage = jester.phase >= 3
+      ? "The Jester is running out of jokes."
+      : "Thorn Jester bows dramatically.";
+    game.message = "Your turn. Attack, Analyze, or Heal.";
+  }
+
+  function chooseJesterAction() {
+    if (game.state !== "jesterPlayerTurn") return;
+
+    const action = menuItems[battle.menuIndex];
+
+    if (action === "ATTACK") {
+      const damage = jester.analyzed ? 8 : 6;
+      jester.hp = Math.max(0, jester.hp - damage);
+      battle.actionMessage = "Ari fires through the fake smile. Thorn Jester takes " + damage + " damage.";
+      spawnBattleParticles(W / 2, battleBox.y - 80, 28, "#c99bff");
+
+      if (jester.hp <= 0) {
+        jester.defeated = true;
+        progress.jesterDefeated = true;
+        progress.unlockedBoss = Math.max(progress.unlockedBoss, 3);
+        saveProgress();
+        game.state = "jesterVictory";
+        startDialogue("Thorn Jester", [
+          "AHAHA--",
+          "...oh.",
+          "You did not laugh.",
+          "That makes you dangerous."
+        ]);
+        return;
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "jesterPlayerTurn") startJesterBattle();
+      }, 950);
+      return;
+    }
+
+    if (action === "ANALYZE") {
+      jester.analyzed = true;
+      battle.actionMessage = "ANALYSIS: Purple warnings may be fake. Bright yellow warnings are real.";
+      game.message = "Jester analyzed. Attacks deal more damage.";
+
+      setTimeoutSafe(() => {
+        if (game.state === "jesterPlayerTurn") startJesterBattle();
+      }, 1500);
+      return;
+    }
+
+    if (action === "HEAL") {
+      if (battle.healCharges > 0) {
+        battle.healCharges--;
+        player.hp = Math.min(player.maxHp, player.hp + 7);
+        battle.actionMessage = "Repair gel used. HP restored by 7.";
+      } else {
+        battle.actionMessage = "No repair gel left.";
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "jesterPlayerTurn") startJesterBattle();
+      }, 1000);
+    }
+  }
+
+  function updateJesterBattle(dt) {
+    layoutBattleBox();
+
+    jester.anim += dt;
+    battle.timer += dt;
+    player.anim += dt;
+    player.inv = Math.max(0, player.inv - dt);
+
+    updateAirMovement(dt);
+    updateJesterPatterns(dt);
+    updateBattleBullets(dt);
+    updateBattleBeams(dt);
+    updateBattleParticles(dt);
+
+    if (battle.timer >= battle.turnDuration) {
+      startJesterPlayerTurn();
+    }
+  }
+
+  function updateJesterPatterns(dt) {
+    const t = battle.timer;
+    jester.phase = jester.hp <= 18 ? 3 : jester.hp <= 34 ? 2 : 1;
+
+    // Bouncing thorn balls. They bounce off top/bottom, but leave the screen horizontally.
+    if (Math.floor(t * (jester.phase >= 3 ? 1.55 : 1.1)) !== Math.floor((t - dt) * (jester.phase >= 3 ? 1.55 : 1.1))) {
+      const fromLeft = Math.random() > 0.5;
+      const y = battleBox.y + 60 + Math.random() * (battleBox.h - 120);
+      const vx = fromLeft ? 150 + Math.random() * 40 : -150 - Math.random() * 40;
+      const vy = (Math.random() > 0.5 ? 1 : -1) * (80 + Math.random() * 60);
+      const b = { x: fromLeft ? battleBox.x - 22 : battleBox.x + battleBox.w + 22, y, vx, vy, r: 9, color: "#c99bff", life: 9, bounce: true };
+      battle.bullets.push(b);
+    }
+
+    // Fake/real beams. Purple fake beams never become active; yellow ones do.
+    if (Math.floor(t * 0.86) !== Math.floor((t - dt) * 0.86)) {
+      const real = Math.random() > 0.45;
+      const vertical = Math.random() > 0.5;
+
+      if (vertical) {
+        const x = battleBox.x + 55 + Math.random() * (battleBox.w - 110);
+        if (real) spawnBattleBeam(x, battleBox.y, 24, battleBox.h, 0.75, 0.25, "#fff4a8");
+        else spawnFakeBeam(x, battleBox.y, 24, battleBox.h, 0.75);
+      } else {
+        const y = battleBox.y + 48 + Math.random() * (battleBox.h - 96);
+        if (real) spawnBattleBeam(battleBox.x, y, battleBox.w, 24, 0.75, 0.24, "#fff4a8");
+        else spawnFakeBeam(battleBox.x, y, battleBox.w, 24, 0.75);
+      }
+    }
+
+    // Final phase adds aimed joke shots.
+    if (jester.phase >= 3 && Math.floor(t * 1.38) !== Math.floor((t - dt) * 1.38)) {
+      spawnAimedShot(155, "#ff8cff");
+    }
+  }
+
+  function spawnFakeBeam(x, y, w, h, warnTime) {
+    battle.beams.push({
+      x, y, w, h,
+      warn: warnTime,
+      active: 0,
+      maxWarn: warnTime,
+      color: "#c99bff",
+      hitDone: true,
+      fake: true
+    });
+  }
+
+
+  // =====================================================
+  // REUSABLE PATTERN HELPERS + BOSS 3: STATIC MOTH
+  // =====================================================
+
+  function spawnLineOfBullets(startX, startY, count, gap, vx, vy, r, color, horizontal) {
+    for (let i = 0; i < count; i++) {
+      const x = horizontal ? startX + i * gap : startX;
+      const y = horizontal ? startY : startY + i * gap;
+      spawnBattleBullet(x, y, vx, vy, r, color);
+    }
+  }
+
+  function spawnGridBeam(vertical, position, warn, active, color) {
+    if (vertical) {
+      spawnBattleBeam(position, battleBox.y, 18, battleBox.h, warn, active, color);
+    } else {
+      spawnBattleBeam(battleBox.x, position, battleBox.w, 18, warn, active, color);
+    }
+  }
+
+  function startMothIntro() {
+    game.state = "mothIntro";
+    battle.healCharges = 2;
+    player.hp = player.maxHp;
+
+    startDialogue("AI Common Narrator", [
+      "Boss 3 loaded.",
+      "Threat classification: Static Moth.",
+      "This monster lives inside corrupted power lines.",
+      "Its attacks are less random and more like a moving electric puzzle."
+    ], () => {
+      startDialogue("Static Moth", [
+        "BZZT.",
+        "Little cyborg...",
+        "You run on nerves and wires.",
+        "Let us see which breaks first."
+      ], startMothBattle);
+    });
+  }
+
+  function startMothBattle() {
+    layoutBattleBox();
+
+    game.state = "mothBattle";
+    battle.active = true;
+    battle.enemyTurn = true;
+    battle.timer = 0;
+    battle.turnDuration = 14;
+    battle.actionMessage = "";
+    battle.actionTimer = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+    battle.particles.length = 0;
+
+    moth.phase = moth.hp <= 20 ? 3 : moth.hp <= 38 ? 2 : 1;
+
+    player.x = battleBox.x + battleBox.w * 0.22;
+    player.y = battleBox.y + battleBox.h * 0.55;
+    player.vx = 0;
+    player.vy = 0;
+    player.inv = 1.0;
+
+    game.message = "Static Moth attacks. Watch the electric grid.";
+  }
+
+  function startMothPlayerTurn() {
+    game.state = "mothPlayerTurn";
+    battle.enemyTurn = false;
+    battle.timer = 0;
+    battle.menuIndex = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+
+    battle.actionMessage = moth.phase >= 3
+      ? "Static Moth flickers violently."
+      : "Static Moth hangs from the wires.";
+    game.message = "Your turn. Attack, Analyze, or Heal.";
+  }
+
+  function chooseMothAction() {
+    if (game.state !== "mothPlayerTurn") return;
+
+    const action = menuItems[battle.menuIndex];
+
+    if (action === "ATTACK") {
+      const damage = moth.analyzed ? 8 : 6;
+      moth.hp = Math.max(0, moth.hp - damage);
+      battle.actionMessage = "Ari fires a grounded pulse. Static Moth takes " + damage + " damage.";
+      spawnBattleParticles(W / 2, battleBox.y - 80, 30, "#8deeff");
+
+      if (moth.hp <= 0) {
+        moth.defeated = true;
+        progress.mothDefeated = true;
+        progress.unlockedBoss = Math.max(progress.unlockedBoss, 4);
+        saveProgress();
+        game.state = "mothVictory";
+        startDialogue("Static Moth", [
+          "BZZ...ZT...",
+          "The grid...",
+          "recognized you.",
+          "The next monster will not warn you so kindly."
+        ]);
+        return;
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "mothPlayerTurn") startMothBattle();
+      }, 950);
+      return;
+    }
+
+    if (action === "ANALYZE") {
+      moth.analyzed = true;
+      battle.actionMessage = "ANALYSIS: Electric beams form lanes. Stay between them; do not chase every opening.";
+      game.message = "Static Moth analyzed. Attacks deal more damage.";
+
+      setTimeoutSafe(() => {
+        if (game.state === "mothPlayerTurn") startMothBattle();
+      }, 1500);
+      return;
+    }
+
+    if (action === "HEAL") {
+      if (battle.healCharges > 0) {
+        battle.healCharges--;
+        player.hp = Math.min(player.maxHp, player.hp + 7);
+        battle.actionMessage = "Repair gel used. HP restored by 7.";
+      } else {
+        battle.actionMessage = "No repair gel left.";
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "mothPlayerTurn") startMothBattle();
+      }, 1000);
+    }
+  }
+
+  function updateMothBattle(dt) {
+    layoutBattleBox();
+
+    moth.anim += dt;
+    battle.timer += dt;
+    player.anim += dt;
+    player.inv = Math.max(0, player.inv - dt);
+
+    updateAirMovement(dt);
+    updateMothPatterns(dt);
+    updateBattleBullets(dt);
+    updateBattleBeams(dt);
+    updateBattleParticles(dt);
+
+    if (battle.timer >= battle.turnDuration) {
+      startMothPlayerTurn();
+    }
+  }
+
+  function updateMothPatterns(dt) {
+    const t = battle.timer;
+    moth.phase = moth.hp <= 20 ? 3 : moth.hp <= 38 ? 2 : 1;
+
+    // Electric vertical lanes.
+    if (Math.floor(t * (moth.phase >= 3 ? 1.05 : 0.82)) !== Math.floor((t - dt) * (moth.phase >= 3 ? 1.05 : 0.82))) {
+      const lane = Math.floor(Math.random() * 6);
+      const x = battleBox.x + 55 + lane * ((battleBox.w - 110) / 5);
+      spawnGridBeam(true, x, moth.phase >= 3 ? 0.52 : 0.68, 0.22, "#8deeff");
+    }
+
+    // Horizontal static bars.
+    if (moth.phase >= 2 && Math.floor(t * 0.72) !== Math.floor((t - dt) * 0.72)) {
+      const lane = Math.floor(Math.random() * 4);
+      const y = battleBox.y + 60 + lane * ((battleBox.h - 120) / 3);
+      spawnGridBeam(false, y, 0.65, 0.22, "#fff4a8");
+    }
+
+    // Spark rows.
+    if (Math.floor(t * (moth.phase >= 3 ? 1.55 : 1.15)) !== Math.floor((t - dt) * (moth.phase >= 3 ? 1.55 : 1.15))) {
+      const fromLeft = Math.random() > 0.5;
+      const y = battleBox.y + 60 + Math.random() * (battleBox.h - 120);
+      spawnLineOfBullets(
+        fromLeft ? battleBox.x - 30 : battleBox.x + battleBox.w + 30,
+        y,
+        3,
+        28,
+        fromLeft ? 145 : -145,
+        (Math.random() - 0.5) * 20,
+        6,
+        "#8deeff",
+        false
+      );
+    }
+
+    // Final phase blackout aimed bolt.
+    if (moth.phase >= 3 && Math.floor(t * 1.0) !== Math.floor((t - dt) * 1.0)) {
+      spawnAimedShot(185, "#ffffff");
+    }
+  }
+
+
+  // =====================================================
+  // BOSS 4: BONE LANTERN
+  // =====================================================
+
+  function startLanternIntro() {
+    game.state = "lanternIntro";
+    battle.healCharges = 2;
+    player.hp = player.maxHp;
+
+    startDialogue("AI Common Narrator", [
+      "Boss 4 loaded.",
+      "Threat classification: Bone Lantern.",
+      "This monster controls the shape of the combat chamber.",
+      "It attacks slowly, but its patterns can trap careless movement."
+    ], () => {
+      startDialogue("Bone Lantern", [
+        "A little machine walks into the dark.",
+        "Good.",
+        "Hold still.",
+        "I need somewhere to hang the light."
+      ], startLanternBattle);
+    });
+  }
+
+  function startLanternBattle() {
+    layoutBattleBox();
+
+    game.state = "lanternBattle";
+    battle.active = true;
+    battle.enemyTurn = true;
+    battle.timer = 0;
+    battle.turnDuration = 15;
+    battle.actionMessage = "";
+    battle.actionTimer = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+    battle.particles.length = 0;
+
+    lantern.phase = lantern.hp <= 22 ? 3 : lantern.hp <= 42 ? 2 : 1;
+
+    player.x = battleBox.x + battleBox.w * 0.22;
+    player.y = battleBox.y + battleBox.h * 0.55;
+    player.vx = 0;
+    player.vy = 0;
+    player.inv = 1.0;
+
+    game.message = "Bone Lantern attacks. Read the sliding bars.";
+  }
+
+  function startLanternPlayerTurn() {
+    game.state = "lanternPlayerTurn";
+    battle.enemyTurn = false;
+    battle.timer = 0;
+    battle.menuIndex = 0;
+    battle.bullets.length = 0;
+    battle.beams.length = 0;
+
+    battle.actionMessage = lantern.phase >= 3
+      ? "Bone Lantern burns with a cold light."
+      : "Bone Lantern swings gently.";
+    game.message = "Your turn. Attack, Analyze, or Heal.";
+  }
+
+  function chooseLanternAction() {
+    if (game.state !== "lanternPlayerTurn") return;
+
+    const action = menuItems[battle.menuIndex];
+
+    if (action === "ATTACK") {
+      const damage = lantern.analyzed ? 9 : 7;
+      lantern.hp = Math.max(0, lantern.hp - damage);
+      battle.actionMessage = "Ari fires at the lantern core. Bone Lantern takes " + damage + " damage.";
+      spawnBattleParticles(W / 2, battleBox.y - 78, 34, "#fff4a8");
+
+      if (lantern.hp <= 0) {
+        lantern.defeated = true;
+        progress.lanternDefeated = true;
+        progress.unlockedBoss = Math.max(progress.unlockedBoss, 5);
+        saveProgress();
+        game.state = "lanternVictory";
+        startDialogue("Bone Lantern", [
+          "The light goes out...",
+          "but the tunnel does not end.",
+          "Something royal waits behind the dark."
+        ]);
+        return;
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "lanternPlayerTurn") startLanternBattle();
+      }, 950);
+      return;
+    }
+
+    if (action === "ANALYZE") {
+      lantern.analyzed = true;
+      battle.actionMessage = "ANALYSIS: Bone bars have wide lanes. Do not panic-jump into the next beam.";
+      game.message = "Bone Lantern analyzed. Attacks deal more damage.";
+
+      setTimeoutSafe(() => {
+        if (game.state === "lanternPlayerTurn") startLanternBattle();
+      }, 1500);
+      return;
+    }
+
+    if (action === "HEAL") {
+      if (battle.healCharges > 0) {
+        battle.healCharges--;
+        player.hp = Math.min(player.maxHp, player.hp + 7);
+        battle.actionMessage = "Repair gel used. HP restored by 7.";
+      } else {
+        battle.actionMessage = "No repair gel left.";
+      }
+
+      setTimeoutSafe(() => {
+        if (game.state === "lanternPlayerTurn") startLanternBattle();
+      }, 1000);
+    }
+  }
+
+  function updateLanternBattle(dt) {
+    layoutBattleBox();
+
+    lantern.anim += dt;
+    battle.timer += dt;
+    player.anim += dt;
+    player.inv = Math.max(0, player.inv - dt);
+
+    updateAirMovement(dt);
+    updateLanternPatterns(dt);
+    updateBattleBullets(dt);
+    updateBattleBeams(dt);
+    updateBattleParticles(dt);
+
+    if (battle.timer >= battle.turnDuration) {
+      startLanternPlayerTurn();
+    }
+  }
+
+  function updateLanternPatterns(dt) {
+    const t = battle.timer;
+    lantern.phase = lantern.hp <= 22 ? 3 : lantern.hp <= 42 ? 2 : 1;
+
+    // Slow bone bars with large lanes.
+    if (Math.floor(t * (lantern.phase >= 3 ? 0.92 : 0.72)) !== Math.floor((t - dt) * (lantern.phase >= 3 ? 0.92 : 0.72))) {
+      const vertical = Math.random() > 0.45;
+      if (vertical) {
+        const x = battleBox.x + 55 + Math.random() * (battleBox.w - 110);
+        spawnBattleBeam(x, battleBox.y, lantern.phase >= 3 ? 32 : 38, battleBox.h, 0.78, 0.34, "#fff4a8");
+      } else {
+        const y = battleBox.y + 55 + Math.random() * (battleBox.h - 110);
+        spawnBattleBeam(battleBox.x, y, battleBox.w, lantern.phase >= 3 ? 30 : 36, 0.78, 0.34, "#fff4a8");
+      }
+    }
+
+    // Lantern embers fall slowly; they are meant to pressure air-jumps.
+    if (Math.floor(t * (lantern.phase >= 3 ? 1.5 : 1.05)) !== Math.floor((t - dt) * (lantern.phase >= 3 ? 1.5 : 1.05))) {
+      const x = battleBox.x + 35 + Math.random() * (battleBox.w - 70);
+      spawnBattleBullet(x, battleBox.y - 20, (Math.random() - 0.5) * 45, 92 + Math.random() * 35, 8, "#fff4a8");
+    }
+
+    // Phase 2+ adds diagonal drifting bones.
+    if (lantern.phase >= 2 && Math.floor(t * 0.82) !== Math.floor((t - dt) * 0.82)) {
+      const fromLeft = Math.random() > 0.5;
+      const y = battleBox.y + 70 + Math.random() * (battleBox.h - 140);
+      spawnBattleBullet(
+        fromLeft ? battleBox.x - 25 : battleBox.x + battleBox.w + 25,
+        y,
+        fromLeft ? 135 : -135,
+        (Math.random() > 0.5 ? 1 : -1) * 52,
+        9,
+        "#d8fbff"
+      );
+    }
+
+    // Phase 3 adds an aimed cold-light shot.
+    if (lantern.phase >= 3 && Math.floor(t * 1.05) !== Math.floor((t - dt) * 1.05)) {
+      spawnAimedShot(165, "#ffffff");
+    }
+  }
+
+  function drawBackgroundBase() {
+    ctx.fillStyle = "#05070d";
+    ctx.fillRect(0, 0, W, H);
+
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#070915");
+    g.addColorStop(0.5, "#0b1020");
+    g.addColorStop(1, "#08080d");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+
+  function drawBossSelect() {
+    drawBackgroundBase();
+
+    ctx.save();
+    ctx.fillStyle = "#e8fbff";
+    ctx.font = "bold 42px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("WATCHER PROTOCOL", W / 2, 70);
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "20px monospace";
+    ctx.fillText("FINAL DEMO // CHECKPOINT SELECT", W / 2, 122);
+
+    const panelW = Math.min(760, W - 70);
+    const panelX = W / 2 - panelW / 2;
+    const panelY = 165;
+
+    ctx.fillStyle = "rgba(8,12,22,0.86)";
+    roundRect(panelX, panelY, panelW, 485, 22);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(141,238,255,0.7)";
+    ctx.lineWidth = 2;
+    roundRect(panelX, panelY, panelW, 485, 22);
+    ctx.stroke();
+
+    ctx.font = "bold 20px monospace";
+    ctx.textAlign = "left";
+
+    for (let i = 0; i < bossSelect.options.length; i++) {
+      const option = bossSelect.options[i];
+      const y = panelY + 38 + i * 56;
+      const selected = i === bossSelect.index;
+
+      ctx.fillStyle = selected ? "rgba(255,244,168,0.16)" : "rgba(255,255,255,0.03)";
+      roundRect(panelX + 24, y - 10, panelW - 48, 42, 12);
+      ctx.fill();
+
+      ctx.fillStyle = selected ? "#fff4a8" : "#d8fbff";
+      ctx.fillText((selected ? "> " : "  ") + option.label, panelX + 48, y);
+
+      ctx.fillStyle = "rgba(255,255,255,0.58)";
+      ctx.font = "13px monospace";
+      ctx.fillText(option.desc, panelX + 74, y + 22);
+      ctx.font = "bold 20px monospace";
+    }
+
+    ctx.fillStyle = progress.watcherDefeated ? "#9dffb1" : "#ffcf7a";
+    ctx.font = "15px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      progress.lanternDefeated
+        ? "SAVE: BOSS 1 + 2 + 3 + 4 CLEARED"
+        : progress.mothDefeated
+          ? "SAVE: BOSS 1 + 2 + 3 CLEARED"
+          : progress.jesterDefeated
+          ? "SAVE: BOSS 1 + BOSS 2 CLEARED"
+          : progress.watcherDefeated
+            ? "SAVE: BOSS 1 CLEARED"
+            : "SAVE: BOSS 1 NOT CLEARED YET",
+      W / 2,
+      panelY + 520
+    );
+
+    ctx.fillStyle = "rgba(255,255,255,0.65)";
+    ctx.font = "14px monospace";
+    ctx.fillText("Use W/S or Up/Down, then Enter. Press B anytime to return here. Recommended: one-file HTML.", W / 2, H - 42);
+
+    if (game.message) {
+      ctx.fillStyle = "#fff4a8";
+      ctx.fillText(game.message, W / 2, H - 70);
+    }
+
+    ctx.restore();
+    drawScanlines();
+  }
+
+  function drawTitle() {
+    drawBackgroundBase();
+
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+
+    for (let i = 0; i < 9; i++) {
+      ctx.beginPath();
+      ctx.arc(0, 0, 60 + i * 34 + Math.sin(game.time * 1.2 + i) * 3, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(120, 230, 255, ${0.08 - i * 0.006})`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = "#e8fbff";
+    ctx.font = "bold 54px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("WATCHER", 0, -58);
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "bold 35px monospace";
+    ctx.fillText("PROTOCOL", 0, -12);
+
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    ctx.font = "18px monospace";
+    ctx.fillText("FINAL DEMO: 1 mini-boss + 4 bosses", 0, 45);
+
+    if (Math.sin(game.time * 5) > -0.2) {
+      ctx.fillStyle = "#fff4a8";
+      ctx.font = "18px monospace";
+      ctx.fillText("PRESS ENTER / SPACE", 0, 112);
+    }
+
+    ctx.restore();
+    drawScanlines();
+  }
+
+  function drawNarrator() {
+    drawBackgroundBase();
+
+    ctx.save();
+
+    const boxW = Math.min(900, W - 60);
+    const boxX = W / 2 - boxW / 2;
+    const startY = 80;
+
+    ctx.fillStyle = "rgba(10,20,34,0.78)";
+    roundRect(boxX, startY - 30, boxW, H - 150, 18);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(120,235,255,0.65)";
+    ctx.lineWidth = 2;
+    roundRect(boxX, startY - 30, boxW, H - 150, 18);
+    ctx.stroke();
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "bold 19px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("AI COMMON NARRATOR // SECURE BRIEFING", boxX + 28, startY);
+
+    let y = startY + 55;
+
+    for (let i = 0; i < narratorLines.length; i++) {
+      let text = narratorLines[i];
+
+      if (i > narratorIndex) break;
+      if (i === narratorIndex) text = text.slice(0, narratorChar);
+
+      ctx.fillStyle = i === narratorIndex ? "#fff4a8" : "#d8fbff";
+      ctx.font = "18px monospace";
+      ctx.fillText("> " + text, boxX + 34, y);
+      y += 34;
+    }
+
+    if (narratorDone) {
+      ctx.fillStyle = "#fff4a8";
+      ctx.font = "16px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("PRESS ENTER / SPACE TO OPEN LAB ROOM", W / 2, H - 70);
+    }
+
+    ctx.restore();
+    drawScanlines();
+  }
+
+  function drawLabRoom() {
+    drawBackgroundBase();
+
+    ctx.save();
+    ctx.translate(-camera.x, 0);
+
+    ctx.fillStyle = "#111827";
+    ctx.fillRect(0, 0, 1400, H);
+
+    for (let i = 0; i < 12; i++) {
+      const x = i * 125;
+      ctx.fillStyle = i % 2 ? "#0d1422" : "#101a2a";
+      ctx.fillRect(x, 70, 120, 320);
+      ctx.strokeStyle = "rgba(110,220,255,0.16)";
+      ctx.strokeRect(x, 70, 120, 320);
+    }
+
+    const floorG = ctx.createLinearGradient(0, lab.floorY, 0, H);
+    floorG.addColorStop(0, "#1c2536");
+    floorG.addColorStop(1, "#090b12");
+    ctx.fillStyle = floorG;
+    ctx.fillRect(0, lab.floorY, 1400, H - lab.floorY);
+
+    ctx.strokeStyle = "rgba(150,240,255,0.12)";
+    ctx.lineWidth = 1;
+
+    for (let x = 0; x < 1400; x += 60) {
+      ctx.beginPath();
+      ctx.moveTo(x, lab.floorY);
+      ctx.lineTo(x + 120, H);
+      ctx.stroke();
+    }
+
+    for (let y = lab.floorY; y < H; y += 40) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(1400, y);
+      ctx.stroke();
+    }
+
+    drawPod(255, lab.floorY);
+    drawConsoles(500, lab.floorY);
+    drawExitDoor(lab.exitX, lab.floorY);
+    drawProfessor(professor.x, professor.y);
+    drawPlayerLab(player.x, player.y);
+
+    ctx.restore();
+
+    drawLabHUD();
+    drawDialogue();
+    drawScanlines();
+  }
+
+  function drawPod(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.fillStyle = "rgba(80,220,255,0.12)";
+    roundRect(-62, -250, 124, 250, 26);
+    ctx.fill();
+
+    ctx.strokeStyle = "#8deeff";
+    ctx.lineWidth = 3;
+    roundRect(-62, -250, 124, 250, 26);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(-42, -230, 84, 185);
+
+    ctx.fillStyle = "#1b3147";
+    ctx.fillRect(-75, -18, 150, 18);
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("UNIT-07 POD", 0, -262);
+
+    ctx.restore();
+  }
+
+  function drawConsoles(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.fillStyle = "#172033";
+    roundRect(-70, -100, 180, 88, 12);
+    ctx.fill();
+
+    ctx.fillStyle = "#0b101a";
+    ctx.fillRect(-52, -86, 140, 45);
+
+    ctx.fillStyle = "#64f0ff";
+    for (let i = 0; i < 5; i++) {
+      ctx.fillRect(-40 + i * 24, -74 + Math.sin(game.time * 4 + i) * 7, 14, 3);
+    }
+
+    ctx.fillStyle = "#ff5f79";
+    ctx.beginPath();
+    ctx.arc(-36, -25, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.beginPath();
+    ctx.arc(-16, -25, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawExitDoor(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.fillStyle = "#0b0d13";
+    roundRect(-58, -230, 116, 230, 10);
+    ctx.fill();
+
+    ctx.strokeStyle = "#69e6ff";
+    ctx.lineWidth = 3;
+    roundRect(-58, -230, 116, 230, 10);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(105,230,255,0.2)";
+    ctx.fillRect(-46, -210, 92, 170);
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.font = "13px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("TUTORIAL", 0, -244);
+
+    if (game.state === "labFree" && Math.abs(player.x - lab.exitX) < 80 && !dialogue.active) {
+      ctx.fillStyle = "#fff4a8";
+      ctx.font = "15px monospace";
+      ctx.fillText("PRESS E", 0, -265);
+    }
+
+    ctx.restore();
+  }
+
+  function drawProfessor(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+    const bob = Math.sin(professor.anim * 2) * 1.5;
+    ctx.translate(0, bob);
+
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.ellipse(0, 6, 28, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "#151821";
+    ctx.fillRect(-12, -28, 8, 34);
+    ctx.fillRect(5, -28, 8, 34);
+
+    ctx.fillStyle = "#d7e8ee";
+    ctx.fillRect(-24, -88, 48, 65);
+    ctx.fillStyle = "#afc9d2";
+    ctx.fillRect(-4, -88, 8, 65);
+
+    ctx.fillStyle = "#d8aa78";
+    ctx.fillRect(-14, -112, 28, 28);
+
+    ctx.fillStyle = "#e9f8ff";
+    ctx.fillRect(-17, -118, 34, 10);
+    ctx.fillRect(-20, -108, 8, 16);
+
+    ctx.strokeStyle = "#14202a";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-12, -104, 9, 6);
+    ctx.strokeRect(3, -104, 9, 6);
+
+    ctx.restore();
+
+    if (game.state === "labFree" && Math.abs(player.x - professor.x) < 95 && !dialogue.active) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = "#fff4a8";
+      ctx.font = "14px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("PRESS E", 0, -145);
+      ctx.restore();
+    }
+  }
+
+  function drawPlayerLab(x, y) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(player.facing, 1);
+
+    const walk = Math.sin(player.anim * 12);
+    const moving = Math.abs(player.vx) > 20;
+
+    ctx.globalAlpha = 0.28;
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.ellipse(0, 7, 22, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "#171b2a";
+    ctx.fillRect(-10, -26, 7, 30 + (moving ? walk * 2 : 0));
+    ctx.fillRect(5, -26, 7, 30 - (moving ? walk * 2 : 0));
+
+    ctx.fillStyle = "#0a0c12";
+    ctx.fillRect(-13, 1, 12, 6);
+    ctx.fillRect(3, 1, 12, 6);
+
+    ctx.fillStyle = "#26395c";
+    ctx.fillRect(-18, -70, 36, 46);
+
+    ctx.fillStyle = "#8deeff";
+    ctx.fillRect(18, -64, 7, 34);
+    ctx.fillStyle = "#d8fbff";
+    ctx.fillRect(20, -45, 10, 5);
+
+    ctx.fillStyle = "#d09c70";
+    ctx.fillRect(-25, -64, 7, 34);
+
+    ctx.fillStyle = "#d8aa78";
+    ctx.fillRect(-12, -88, 24, 20);
+
+    ctx.fillStyle = "#111826";
+    ctx.fillRect(-15, -96, 30, 12);
+    ctx.fillRect(-17, -87, 7, 12);
+
+    ctx.fillStyle = "#ff4f75";
+    ctx.fillRect(3, -84, 7, 4);
+
+    ctx.fillStyle = "#101018";
+    ctx.fillRect(-8, -84, 4, 4);
+
+    ctx.fillStyle = "#8deeff";
+    ctx.fillRect(-4, -56, 8, 8);
+
+    ctx.restore();
+  }
+
+  function drawLabHUD() {
+    ctx.save();
+
+    ctx.fillStyle = "rgba(7,10,18,0.7)";
+    roundRect(18, 18, 280, 64, 12);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(141,238,255,0.45)";
+    ctx.lineWidth = 2;
+    roundRect(18, 18, 280, 64, 12);
+    ctx.stroke();
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "bold 15px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("SUBJECT: " + player.name, 34, 32);
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.font = "13px monospace";
+    ctx.fillText("HP: " + player.hp + "/" + player.maxHp + "   MODE: LAB", 34, 56);
+
+    if (game.message && !dialogue.active) {
+      ctx.fillStyle = "rgba(255,244,168,0.9)";
+      ctx.font = "15px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(game.message, W / 2, H - 42);
+    }
+
+    ctx.restore();
+  }
+
+  function drawTutorial() {
+    drawBackgroundBase();
+
+    const sx = game.shake > 0 ? (Math.random() - 0.5) * game.shake * 30 : 0;
+    const sy = game.shake > 0 ? (Math.random() - 0.5) * game.shake * 30 : 0;
+
+    ctx.save();
+    ctx.translate(sx, sy);
+
+    // corridor frame
+    const gridG = ctx.createLinearGradient(0, 0, 0, H);
+    gridG.addColorStop(0, "#070b15");
+    gridG.addColorStop(1, "#10192b");
+    ctx.fillStyle = gridG;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = "rgba(141,238,255,0.09)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 48) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    for (let y = 0; y < H; y += 48) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+
+    // battle box
+    ctx.fillStyle = "rgba(2,5,12,0.78)";
+    ctx.fillRect(battleBox.x, battleBox.y, battleBox.w, battleBox.h);
+
+    ctx.strokeStyle = "#d8fbff";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(battleBox.x, battleBox.y, battleBox.w, battleBox.h);
+
+    ctx.strokeStyle = "rgba(141,238,255,0.18)";
+    ctx.lineWidth = 1;
+    for (let x = battleBox.x; x <= battleBox.x + battleBox.w; x += 40) {
+      ctx.beginPath();
+      ctx.moveTo(x, battleBox.y);
+      ctx.lineTo(x, battleBox.y + battleBox.h);
+      ctx.stroke();
+    }
+
+    for (let y = battleBox.y; y <= battleBox.y + battleBox.h; y += 40) {
+      ctx.beginPath();
+      ctx.moveTo(battleBox.x, y);
+      ctx.lineTo(battleBox.x + battleBox.w, y);
+      ctx.stroke();
+    }
+
+    drawBeams();
+    drawBullets();
+    drawTutorialParticles();
+    drawPlayerBattle();
+
+    ctx.restore();
+
+    drawTutorialHUD();
+    drawDialogue();
+    drawScanlines();
+  }
+
+  function drawPlayerBattle() {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.scale(player.facing, 1);
+
+    const hurtFlash = player.inv > 0 && Math.floor(player.inv * 18) % 2 === 0;
+    ctx.globalAlpha = hurtFlash ? 0.45 : 1;
+
+    // jet/burst glow
+    if (player.vy < -120) {
+      ctx.fillStyle = "rgba(141,238,255,0.55)";
+      ctx.beginPath();
+      ctx.moveTo(-10, 20);
+      ctx.lineTo(0, 40 + Math.random() * 12);
+      ctx.lineTo(10, 20);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // tiny 16-bit body
+    ctx.fillStyle = "#171b2a";
+    ctx.fillRect(-9, 10, 7, 18);
+    ctx.fillRect(4, 10, 7, 18);
+
+    ctx.fillStyle = "#0a0c12";
+    ctx.fillRect(-12, 26, 12, 5);
+    ctx.fillRect(2, 26, 12, 5);
+
+    ctx.fillStyle = "#26395c";
+    ctx.fillRect(-17, -32, 34, 42);
+
+    ctx.fillStyle = "#8deeff";
+    ctx.fillRect(17, -26, 7, 28);
+    ctx.fillStyle = "#d09c70";
+    ctx.fillRect(-24, -26, 7, 28);
+
+    ctx.fillStyle = "#d8aa78";
+    ctx.fillRect(-11, -50, 22, 20);
+
+    ctx.fillStyle = "#111826";
+    ctx.fillRect(-14, -58, 28, 11);
+    ctx.fillRect(-16, -49, 7, 10);
+
+    ctx.fillStyle = "#ff4f75";
+    ctx.fillRect(3, -45, 7, 4);
+    ctx.fillStyle = "#101018";
+    ctx.fillRect(-8, -45, 4, 4);
+
+    ctx.fillStyle = "#8deeff";
+    ctx.fillRect(-4, -18, 8, 8);
+
+    ctx.restore();
+  }
+
+  function drawBullets() {
+    for (const b of tutorial.bullets) {
+      if (!b) continue;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+
+      ctx.fillStyle = b.color;
+      ctx.shadowColor = b.color;
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(0, 0, b.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+  }
+
+  function drawBeams() {
+    for (const beam of tutorial.beams) {
+      if (!beam) continue;
+      if (beam.warn > 0) {
+        const a = 0.18 + Math.sin(game.time * 18) * 0.08;
+        if (beam.fake) {
+          ctx.fillStyle = `rgba(201,155,255,${a})`;
+          ctx.strokeStyle = "rgba(201,155,255,0.9)";
+        } else {
+          ctx.fillStyle = `rgba(255,244,168,${a})`;
+          ctx.strokeStyle = "rgba(255,244,168,0.9)";
+        }
+        ctx.fillRect(beam.x, beam.y, beam.w, beam.h);
+
+        ctx.lineWidth = 2;
+        ctx.strokeRect(beam.x, beam.y, beam.w, beam.h);
+      } else {
+        ctx.fillStyle = beam.color === "#ff6f85"
+          ? "rgba(255,111,133,0.82)"
+          : "rgba(255,244,168,0.82)";
+        ctx.fillRect(beam.x, beam.y, beam.w, beam.h);
+
+        ctx.fillStyle = "rgba(255,255,255,0.65)";
+        ctx.fillRect(beam.x + 3, beam.y + 3, Math.max(0, beam.w - 6), Math.max(0, beam.h - 6));
+      }
+    }
+  }
+
+  function drawTutorialParticles() {
+    ctx.save();
+
+    for (const p of tutorial.particles) {
+      if (!p) continue;
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  function drawTutorialHUD() {
+    ctx.save();
+
+    ctx.fillStyle = "rgba(7,10,18,0.78)";
+    roundRect(18, 18, 370, 84, 12);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(141,238,255,0.45)";
+    ctx.lineWidth = 2;
+    roundRect(18, 18, 370, 84, 12);
+    ctx.stroke();
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "bold 15px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("SUBJECT: " + player.name + "  // MOVEMENT CALIBRATION", 34, 32);
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.font = "13px monospace";
+    ctx.fillText("HP: " + player.hp + "/" + player.maxHp + "   TIME: " + Math.floor(tutorial.timer) + "/30", 34, 57);
+
+    // HP bar
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    roundRect(34, 74, 230, 12, 6);
+    ctx.fill();
+
+    ctx.fillStyle = "#ff5f79";
+    roundRect(34, 74, 230 * (player.hp / player.maxHp), 12, 6);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255,244,168,0.9)";
+    ctx.font = "15px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(game.message || "", W / 2, H - 42);
+
+    ctx.restore();
+  }
+
+  function drawDialogue() {
+    if (!dialogue.active) return;
+
+    const boxW = Math.min(900, W - 60);
+    const boxH = 155;
+    const boxX = W / 2 - boxW / 2;
+    const boxY = H - boxH - 58;
+
+    ctx.fillStyle = "rgba(8,12,22,0.94)";
+    roundRect(boxX, boxY, boxW, boxH, 20);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(141,238,255,0.75)";
+    ctx.lineWidth = 2;
+    roundRect(boxX, boxY, boxW, boxH, 20);
+    ctx.stroke();
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "bold 18px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(dialogue.speaker, boxX + 28, boxY + 24);
+
+    const line = dialogue.lines[dialogue.index] || "";
+    wrapText(line, boxX + 28, boxY + 62, boxW - 56, 28, "20px monospace", "#ffffff");
+
+    ctx.fillStyle = "rgba(255,244,168,0.75)";
+    ctx.font = "14px monospace";
+    ctx.textAlign = "right";
+    ctx.fillText("ENTER / SPACE / E", boxX + boxW - 28, boxY + boxH - 24);
+  }
+
+
+  function drawBattleArena() {
+    drawBackgroundBase();
+
+    const sx = game.shake > 0 ? (Math.random() - 0.5) * game.shake * 30 : 0;
+    const sy = game.shake > 0 ? (Math.random() - 0.5) * game.shake * 30 : 0;
+
+    ctx.save();
+    ctx.translate(sx, sy);
+
+    const gridG = ctx.createLinearGradient(0, 0, 0, H);
+    gridG.addColorStop(0, "#070b15");
+    gridG.addColorStop(1, "#11101d");
+    ctx.fillStyle = gridG;
+    ctx.fillRect(0, 0, W, H);
+
+    // Boss display area.
+    if (
+      game.state === "lanternBattle" ||
+      game.state === "lanternPlayerTurn" ||
+      game.state === "lanternVictory"
+    ) {
+      drawLanternBoss(W / 2, battleBox.y - 86);
+    } else if (
+      game.state === "mothBattle" ||
+      game.state === "mothPlayerTurn" ||
+      game.state === "mothVictory"
+    ) {
+      drawMothBoss(W / 2, battleBox.y - 88);
+    } else if (
+      game.state === "jesterBattle" ||
+      game.state === "jesterPlayerTurn" ||
+      game.state === "jesterVictory"
+    ) {
+      drawJesterBoss(W / 2, battleBox.y - 86);
+    } else if (
+      game.state === "watcherBattle" ||
+      game.state === "watcherPlayerTurn" ||
+      game.state === "watcherVictory"
+    ) {
+      drawWatcherBoss(W / 2, battleBox.y - 88);
+    } else {
+      drawWatcherScoutBoss(W / 2, battleBox.y - 68);
+    }
+
+    // Battle box.
+    ctx.fillStyle = "rgba(2,5,12,0.80)";
+    ctx.fillRect(battleBox.x, battleBox.y, battleBox.w, battleBox.h);
+
+    ctx.strokeStyle = "#d8fbff";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(battleBox.x, battleBox.y, battleBox.w, battleBox.h);
+
+    ctx.strokeStyle = "rgba(141,238,255,0.13)";
+    ctx.lineWidth = 1;
+    for (let x = battleBox.x; x <= battleBox.x + battleBox.w; x += 40) {
+      ctx.beginPath();
+      ctx.moveTo(x, battleBox.y);
+      ctx.lineTo(x, battleBox.y + battleBox.h);
+      ctx.stroke();
+    }
+    for (let y = battleBox.y; y <= battleBox.y + battleBox.h; y += 40) {
+      ctx.beginPath();
+      ctx.moveTo(battleBox.x, y);
+      ctx.lineTo(battleBox.x + battleBox.w, y);
+      ctx.stroke();
+    }
+
+    drawBattleBeams();
+    drawBattleBullets();
+    drawBattleParticles();
+
+    if (
+      game.state === "scoutBattle" ||
+      game.state === "watcherBattle" ||
+      game.state === "jesterBattle" ||
+      game.state === "mothBattle"
+    ) drawPlayerBattle();
+
+    ctx.restore();
+
+    drawBattleHUD();
+
+    if (game.state === "scoutPlayerTurn") drawBattleMenu();
+
+    drawDialogue();
+    drawScanlines();
+  }
+
+  function drawWatcherScoutBoss(x, y) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(game.time * 3) * 4);
+
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath();
+    ctx.arc(0, 0, 115, 0, Math.PI * 2);
+    ctx.fill();
+
+    // metal fins
+    ctx.fillStyle = "#29334a";
+    for (let i = 0; i < 8; i++) {
+      const a = (Math.PI * 2 * i) / 8 + game.time * 0.25;
+      ctx.save();
+      ctx.rotate(a);
+      ctx.fillRect(52, -7, 42, 14);
+      ctx.restore();
+    }
+
+    // eye body
+    ctx.fillStyle = "#d8fbff";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 70, 48, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#132034";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 49, 34, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#8deeff";
+    ctx.beginPath();
+    ctx.arc(0, 0, 22 + Math.sin(game.time * 5) * 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#05070d";
+    ctx.beginPath();
+    ctx.arc(0, 0, 10, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(8, -8, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // HP bar
+    const bw = 260;
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    roundRect(-bw / 2, 72, bw, 14, 7);
+    ctx.fill();
+
+    ctx.fillStyle = "#ff6f85";
+    roundRect(-bw / 2, 72, bw * (scout.hp / scout.maxHp), 14, 7);
+    ctx.fill();
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "bold 16px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(scout.name, 0, 93);
+
+    ctx.restore();
+  }
+
+
+  function drawWatcherBoss(x, y) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(game.time * 2.5) * 5);
+
+    const phase = watcher.hp <= 18 ? 3 : watcher.hp <= 34 ? 2 : 1;
+    const pulse = Math.sin(game.time * (phase === 3 ? 10 : 5)) * 3;
+
+    // outer biomechanical ring
+    ctx.strokeStyle = phase === 3 ? "rgba(255,95,121,0.9)" : "rgba(141,238,255,0.7)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 128 + pulse, 78 + pulse * 0.3, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // armor plates
+    ctx.fillStyle = "#26324a";
+    for (let i = 0; i < 12; i++) {
+      const a = (Math.PI * 2 * i) / 12 + game.time * 0.18;
+      ctx.save();
+      ctx.rotate(a);
+      ctx.fillRect(92, -8, 46, 16);
+      ctx.restore();
+    }
+
+    // eye white
+    const eyeG = ctx.createRadialGradient(-20, -15, 8, 0, 0, 118);
+    eyeG.addColorStop(0, "#ffffff");
+    eyeG.addColorStop(0.55, "#d8fbff");
+    eyeG.addColorStop(1, "#61718f");
+
+    ctx.fillStyle = eyeG;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 108, 64, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // cracks in later phase
+    if (phase >= 2) {
+      ctx.strokeStyle = phase === 3 ? "#ff5f79" : "#31415f";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-50, -18);
+      ctx.lineTo(-20, 4);
+      ctx.lineTo(-38, 34);
+      ctx.moveTo(42, -28);
+      ctx.lineTo(25, -4);
+      ctx.lineTo(57, 20);
+      ctx.stroke();
+    }
+
+    // iris / pupil
+    ctx.fillStyle = phase === 3 ? "#ff5f79" : "#8deeff";
+    ctx.beginPath();
+    ctx.arc(0, 0, 34 + pulse, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#05070d";
+    ctx.beginPath();
+    ctx.arc(0, 0, 16 + Math.max(0, pulse * 0.5), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(12, -12, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // HP bar
+    const bw = 330;
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    roundRect(-bw / 2, 98, bw, 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = phase === 3 ? "#ff5f79" : "#ff8aa0";
+    roundRect(-bw / 2, 98, bw * (watcher.hp / watcher.maxHp), 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "bold 18px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(watcher.name + "  PHASE " + phase, 0, 122);
+
+    ctx.restore();
+  }
+
+
+  function drawJesterBoss(x, y) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(game.time * 4) * 5);
+
+    const phase = jester.hp <= 18 ? 3 : jester.hp <= 34 ? 2 : 1;
+    const wobble = Math.sin(game.time * 7) * 6;
+
+    // hat spikes
+    ctx.fillStyle = "#3a174d";
+    for (let i = -3; i <= 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * 32 - 12, -18);
+      ctx.lineTo(i * 32 + wobble * 0.2, -78 - Math.abs(i) * 4);
+      ctx.lineTo(i * 32 + 16, -18);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // face
+    ctx.fillStyle = "#d8fbff";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 86, 58, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#5b2a75";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 64, 42, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // mismatched eyes
+    ctx.fillStyle = "#fff4a8";
+    ctx.beginPath();
+    ctx.arc(-25, -7, 12 + Math.sin(game.time * 10) * 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#ff6f85";
+    ctx.beginPath();
+    ctx.arc(27, -6, 9 + Math.cos(game.time * 8) * 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // grin
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(0, 8, 34, 0.15, Math.PI - 0.15);
+    ctx.stroke();
+
+    // cheek dots
+    ctx.fillStyle = phase >= 3 ? "#ff6f85" : "#c99bff";
+    ctx.fillRect(-47, 8, 8, 8);
+    ctx.fillRect(39, 8, 8, 8);
+
+    // HP bar
+    const bw = 310;
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    roundRect(-bw / 2, 92, bw, 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = phase === 3 ? "#ff6f85" : "#c99bff";
+    roundRect(-bw / 2, 92, bw * (jester.hp / jester.maxHp), 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "bold 18px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(jester.name + "  PHASE " + phase, 0, 117);
+
+    ctx.restore();
+  }
+
+
+  function drawMothBoss(x, y) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(game.time * 3) * 5);
+
+    const phase = moth.hp <= 20 ? 3 : moth.hp <= 38 ? 2 : 1;
+    const flap = Math.sin(game.time * (phase >= 3 ? 12 : 8)) * 10;
+
+    // electric aura
+    ctx.strokeStyle = phase >= 3 ? "rgba(255,244,168,0.65)" : "rgba(141,238,255,0.55)";
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 118 + i * 18 + flap * 0.2, 62 + i * 10, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // wings
+    ctx.fillStyle = phase >= 3 ? "#3b315f" : "#24344d";
+    ctx.beginPath();
+    ctx.ellipse(-78, 0 + flap * 0.2, 56, 76 + flap, -0.35, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(78, 0 - flap * 0.2, 56, 76 - flap, 0.35, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#8deeff";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-110, -30);
+    ctx.lineTo(-45, 10);
+    ctx.moveTo(110, -30);
+    ctx.lineTo(45, 10);
+    ctx.stroke();
+
+    // body
+    ctx.fillStyle = "#d8fbff";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 42, 62, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#111827";
+    ctx.beginPath();
+    ctx.ellipse(0, 4, 26, 45, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // eyes
+    ctx.fillStyle = phase >= 3 ? "#fff4a8" : "#8deeff";
+    ctx.fillRect(-16, -18, 10, 8);
+    ctx.fillRect(6, -18, 10, 8);
+
+    // antennae
+    ctx.strokeStyle = "#d8fbff";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-10, -55);
+    ctx.quadraticCurveTo(-50, -90, -70, -70);
+    ctx.moveTo(10, -55);
+    ctx.quadraticCurveTo(50, -90, 70, -70);
+    ctx.stroke();
+
+    // HP bar
+    const bw = 320;
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    roundRect(-bw / 2, 100, bw, 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = phase >= 3 ? "#fff4a8" : "#8deeff";
+    roundRect(-bw / 2, 100, bw * (moth.hp / moth.maxHp), 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "bold 18px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(moth.name + "  PHASE " + phase, 0, 125);
+
+    ctx.restore();
+  }
+
+
+  function drawLanternBoss(x, y) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(game.time * 2.2) * 4);
+
+    const phase = lantern.hp <= 22 ? 3 : lantern.hp <= 42 ? 2 : 1;
+    const swing = Math.sin(game.time * 2.5) * 0.12;
+
+    ctx.rotate(swing);
+
+    // chain
+    ctx.strokeStyle = "#d8fbff";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(0, -125);
+    ctx.lineTo(0, -62);
+    ctx.stroke();
+
+    // bone cage
+    ctx.fillStyle = "#d8fbff";
+    for (let i = -2; i <= 2; i++) {
+      ctx.fillRect(i * 24 - 5, -46, 10, 96);
+    }
+
+    ctx.fillStyle = phase >= 3 ? "#fff4a8" : "#8deeff";
+    ctx.beginPath();
+    ctx.ellipse(0, 8, 50, 64, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#101827";
+    ctx.beginPath();
+    ctx.ellipse(0, 8, 34, 48, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // flame core
+    const flame = Math.sin(game.time * 8) * 6;
+    ctx.fillStyle = phase >= 3 ? "#ff6f85" : "#fff4a8";
+    ctx.beginPath();
+    ctx.moveTo(0, -25 - flame);
+    ctx.bezierCurveTo(28, 8, 18, 42, 0, 52);
+    ctx.bezierCurveTo(-18, 42, -28, 8, 0, -25 - flame);
+    ctx.fill();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.ellipse(0, 22, 12, 20, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.rotate(-swing);
+
+    // HP bar
+    const bw = 320;
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    roundRect(-bw / 2, 105, bw, 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = phase >= 3 ? "#ff6f85" : "#fff4a8";
+    roundRect(-bw / 2, 105, bw * (lantern.hp / lantern.maxHp), 16, 8);
+    ctx.fill();
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "bold 18px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(lantern.name + "  PHASE " + phase, 0, 130);
+
+    ctx.restore();
+  }
+
+  function drawBattleBullets() {
+    for (const b of battle.bullets) {
+      if (!b) continue;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.fillStyle = b.color;
+      ctx.shadowColor = b.color;
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(0, 0, b.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawBattleBeams() {
+    for (const beam of battle.beams) {
+      if (!beam) continue;
+      if (beam.warn > 0) {
+        const a = 0.18 + Math.sin(game.time * 18) * 0.08;
+        if (beam.fake) {
+          ctx.fillStyle = `rgba(201,155,255,${a})`;
+          ctx.strokeStyle = "rgba(201,155,255,0.9)";
+        } else {
+          ctx.fillStyle = `rgba(255,244,168,${a})`;
+          ctx.strokeStyle = "rgba(255,244,168,0.9)";
+        }
+        ctx.fillRect(beam.x, beam.y, beam.w, beam.h);
+
+        ctx.lineWidth = 2;
+        ctx.strokeRect(beam.x, beam.y, beam.w, beam.h);
+      } else {
+        ctx.fillStyle = "rgba(255,244,168,0.82)";
+        ctx.fillRect(beam.x, beam.y, beam.w, beam.h);
+        ctx.fillStyle = "rgba(255,255,255,0.65)";
+        ctx.fillRect(beam.x + 3, beam.y + 3, Math.max(0, beam.w - 6), Math.max(0, beam.h - 6));
+      }
+    }
+  }
+
+  function drawBattleParticles() {
+    ctx.save();
+    for (const p of battle.particles) {
+      if (!p) continue;
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawBattleHUD() {
+    ctx.save();
+
+    ctx.fillStyle = "rgba(7,10,18,0.78)";
+    roundRect(18, 18, 390, 90, 12);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(141,238,255,0.45)";
+    ctx.lineWidth = 2;
+    roundRect(18, 18, 390, 90, 12);
+    ctx.stroke();
+
+    ctx.fillStyle = "#8deeff";
+    ctx.font = "bold 15px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("SUBJECT: " + player.name + "  // LIVE ENEMY CONTACT", 34, 32);
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.font = "13px monospace";
+    ctx.fillText("HP: " + player.hp + "/" + player.maxHp + "   REPAIR GEL: " + battle.healCharges, 34, 57);
+
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    roundRect(34, 74, 230, 12, 6);
+    ctx.fill();
+
+    ctx.fillStyle = "#ff5f79";
+    roundRect(34, 74, 230 * (player.hp / player.maxHp), 12, 6);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255,244,168,0.9)";
+    ctx.font = "15px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(game.message || battle.actionMessage || "", W / 2, H - 42);
+
+    ctx.restore();
+  }
+
+  function drawBattleMenu() {
+    const boxW = Math.min(720, W - 90);
+    const boxH = 96;
+    const boxX = W / 2 - boxW / 2;
+    const boxY = H - boxH - 42;
+
+    ctx.save();
+
+    ctx.fillStyle = "rgba(8,12,22,0.94)";
+    roundRect(boxX, boxY, boxW, boxH, 18);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(141,238,255,0.75)";
+    ctx.lineWidth = 2;
+    roundRect(boxX, boxY, boxW, boxH, 18);
+    ctx.stroke();
+
+    ctx.font = "bold 22px monospace";
+    ctx.textAlign = "center";
+
+    for (let i = 0; i < menuItems.length; i++) {
+      const itemX = boxX + boxW * (0.22 + i * 0.28);
+      const selected = i === battle.menuIndex;
+
+      ctx.fillStyle = selected ? "#fff4a8" : "#d8fbff";
+      ctx.fillText(selected ? "> " + menuItems[i] + " <" : menuItems[i], itemX, boxY + 28);
+    }
+
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    ctx.font = "14px monospace";
+    ctx.fillText(battle.actionMessage || "Choose: Left/Right + Enter, or 1/2/3", W / 2, boxY + 68);
+
+    ctx.restore();
+  }
+
+  function drawEndM6() {
+    drawBattleArena();
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.68)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.font = "bold 32px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("MESSAGE 7 COMPLETE", W / 2, H / 2 - 40);
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "18px monospace";
+    ctx.fillText("Arena enlarged and difficulty balanced. Next: Boss 3 and reusable enemy types.", W / 2, H / 2 + 8);
+    ctx.restore();
+  }
+
+  function drawEndM8() {
+    drawBattleArena();
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.68)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.font = "bold 32px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("MESSAGE 8 COMPLETE", W / 2, H / 2 - 40);
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "18px monospace";
+    ctx.fillText("Boss 3 added. Next: polish, balancing, and final package prep.", W / 2, H / 2 + 8);
+    ctx.restore();
+  }
+
+  function drawEndM9() {
+    drawBattleArena();
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.68)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = "#fff4a8";
+    ctx.font = "bold 32px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("FINAL DEMO COMPLETE", W / 2, H / 2 - 40);
+
+    ctx.fillStyle = "#d8fbff";
+    ctx.font = "18px monospace";
+    ctx.fillText("You cleared the current demo. More bosses can be added later.", W / 2, H / 2 + 8);
+    ctx.restore();
+  }
+
+  function update(dt) {
+    game.time += dt;
+    game.scanlineOffset += dt * 20;
+    game.shake = Math.max(0, game.shake - dt);
+
+    if (game.state === "narrator") updateNarrator(dt);
+    if (
+      game.state === "labCutscene" ||
+      game.state === "labFree" ||
+      game.state === "tutorialIntro" ||
+      game.state === "scoutIntro" ||
+      game.state === "watcherIntro" ||
+      game.state === "jesterIntro" ||
+      game.state === "mothIntro" ||
+      game.state === "lanternIntro"
+    ) updateLab(dt);
+    if (game.state === "tutorial") updateTutorial(dt);
+    if (game.state === "scoutBattle") updateScoutBattle(dt);
+    if (game.state === "watcherBattle") updateWatcherBattle(dt);
+    if (game.state === "jesterBattle") updateJesterBattle(dt);
+    if (game.state === "mothBattle") updateMothBattle(dt);
+    if (game.state === "lanternBattle") updateLanternBattle(dt);
+    if (
+      game.state === "scoutPlayerTurn" ||
+      game.state === "watcherPlayerTurn" ||
+      game.state === "jesterPlayerTurn" ||
+      game.state === "mothPlayerTurn" ||
+      game.state === "lanternPlayerTurn"
+    ) updateBattleParticles(dt);
+  }
+
+  function draw() {
+    if (game.state === "title") drawTitle();
+    else if (game.state === "bossSelect") drawBossSelect();
+    else if (game.state === "narrator") drawNarrator();
+    else if (
+      game.state === "labCutscene" ||
+      game.state === "labFree" ||
+      game.state === "tutorialIntro" ||
+      game.state === "scoutIntro" ||
+      game.state === "watcherIntro" ||
+      game.state === "jesterIntro" ||
+      game.state === "mothIntro" ||
+      game.state === "lanternIntro"
+    ) drawLabRoom();
+    else if (game.state === "tutorial" || game.state === "tutorialComplete") drawTutorial();
+    else if (
+      game.state === "scoutBattle" ||
+      game.state === "scoutPlayerTurn" ||
+      game.state === "scoutVictory" ||
+      game.state === "watcherBattle" ||
+      game.state === "watcherPlayerTurn" ||
+      game.state === "watcherVictory" ||
+      game.state === "jesterBattle" ||
+      game.state === "jesterPlayerTurn" ||
+      game.state === "jesterVictory" ||
+      game.state === "mothBattle" ||
+      game.state === "mothPlayerTurn" ||
+      game.state === "mothVictory" ||
+      game.state === "lanternBattle" ||
+      game.state === "lanternPlayerTurn" ||
+      game.state === "lanternVictory"
+    ) drawBattleArena();
+    else if (game.state === "endM6") drawEndM6();
+    else if (game.state === "endM8") drawEndM8();
+    else if (game.state === "endM9") drawEndM9();
+  }
+
+  let last = performance.now();
+
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+
+    update(dt);
+    draw();
+
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+})();
+
+  </script>
+</body>
+</html>
